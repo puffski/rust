@@ -10,19 +10,20 @@
 
 // FIXME: talk about offset, copy_memory, copy_nonoverlapping_memory
 
-//! Raw, unsafe pointers, `*const T`, and `*mut T`
+//! Raw, unsafe pointers, `*const T`, and `*mut T`.
 //!
-//! *[See also the pointer primitive types](../primitive.pointer.html).*
+//! *[See also the pointer primitive types](../../std/primitive.pointer.html).*
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
-use mem;
 use clone::Clone;
 use intrinsics;
-use ops::Deref;
-use core::fmt;
+use ops::{CoerceUnsized, Deref};
+use fmt;
+use hash;
 use option::Option::{self, Some, None};
-use marker::{PhantomData, Send, Sized, Sync};
+use marker::{Copy, PhantomData, Send, Sized, Sync, Unsize};
+use mem;
 use nonzero::NonZero;
 
 use cmp::{PartialEq, Eq, Ord, PartialOrd};
@@ -39,6 +40,9 @@ pub use intrinsics::copy;
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use intrinsics::write_bytes;
 
+#[stable(feature = "drop_in_place", since = "1.8.0")]
+pub use intrinsics::drop_in_place;
+
 /// Creates a null raw pointer.
 ///
 /// # Examples
@@ -51,7 +55,7 @@ pub use intrinsics::write_bytes;
 /// ```
 #[inline]
 #[stable(feature = "rust1", since = "1.0.0")]
-pub fn null<T>() -> *const T { 0 as *const T }
+pub const fn null<T>() -> *const T { 0 as *const T }
 
 /// Creates a null mutable raw pointer.
 ///
@@ -65,10 +69,10 @@ pub fn null<T>() -> *const T { 0 as *const T }
 /// ```
 #[inline]
 #[stable(feature = "rust1", since = "1.0.0")]
-pub fn null_mut<T>() -> *mut T { 0 as *mut T }
+pub const fn null_mut<T>() -> *mut T { 0 as *mut T }
 
 /// Swaps the values at two mutable locations of the same type, without
-/// deinitialising either. They may overlap, unlike `mem::swap` which is
+/// deinitializing either. They may overlap, unlike `mem::swap` which is
 /// otherwise equivalent.
 ///
 /// # Safety
@@ -100,7 +104,7 @@ pub unsafe fn swap<T>(x: *mut T, y: *mut T) {
 #[inline]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub unsafe fn replace<T>(dest: *mut T, mut src: T) -> T {
-    mem::swap(mem::transmute(dest), &mut src); // cannot overlap
+    mem::swap(&mut *dest, &mut src); // cannot overlap
     src
 }
 
@@ -123,29 +127,11 @@ pub unsafe fn read<T>(src: *const T) -> T {
     tmp
 }
 
-/// Reads the value from `src` and nulls it out without dropping it.
-///
-/// # Safety
-///
-/// This is unsafe for the same reasons that `read` is unsafe.
-#[inline(always)]
-#[unstable(feature = "read_and_zero",
-           reason = "may play a larger role in std::ptr future extensions")]
-pub unsafe fn read_and_zero<T>(dest: *mut T) -> T {
-    // Copy the data out from `dest`:
-    let tmp = read(&*dest);
-
-    // Now zero out `dest`:
-    write_bytes(dest, 0, 1);
-
-    tmp
-}
-
-/// Variant of read_and_zero that writes the specific drop-flag byte
-/// (which may be more appropriate than zero).
+#[allow(missing_docs)]
 #[inline(always)]
 #[unstable(feature = "filling_drop",
-           reason = "may play a larger role in std::ptr future extensions")]
+           reason = "may play a larger role in std::ptr future extensions",
+           issue = "5016")]
 pub unsafe fn read_and_drop<T>(dest: *mut T) -> T {
     // Copy the data out from `dest`:
     let tmp = read(&*dest);
@@ -161,9 +147,11 @@ pub unsafe fn read_and_drop<T>(dest: *mut T) -> T {
 ///
 /// # Safety
 ///
-/// Beyond accepting a raw pointer, this operation is unsafe because it does
-/// not drop the contents of `dst`. This could leak allocations or resources,
-/// so care must be taken not to overwrite an object that should be dropped.
+/// This operation is marked unsafe because it accepts a raw pointer.
+///
+/// It does not drop the contents of `dst`. This is safe, but it could leak
+/// allocations or resources, so care must be taken not to overwrite an object
+/// that should be dropped.
 ///
 /// This is appropriate for initializing uninitialized memory, or overwriting
 /// memory that has previously been `read` from.
@@ -173,14 +161,71 @@ pub unsafe fn write<T>(dst: *mut T, src: T) {
     intrinsics::move_val_init(&mut *dst, src)
 }
 
-#[stable(feature = "rust1", since = "1.0.0")]
+/// Performs a volatile read of the value from `src` without moving it. This
+/// leaves the memory in `src` unchanged.
+///
+/// Volatile operations are intended to act on I/O memory, and are guaranteed
+/// to not be elided or reordered by the compiler across other volatile
+/// operations. See the LLVM documentation on [[volatile]].
+///
+/// [volatile]: http://llvm.org/docs/LangRef.html#volatile-memory-accesses
+///
+/// # Safety
+///
+/// Beyond accepting a raw pointer, this is unsafe because it semantically
+/// moves the value out of `src` without preventing further usage of `src`.
+/// If `T` is not `Copy`, then care must be taken to ensure that the value at
+/// `src` is not used before the data is overwritten again (e.g. with `write`,
+/// `zero_memory`, or `copy_memory`). Note that `*src = foo` counts as a use
+/// because it will attempt to drop the value previously at `*src`.
+#[inline]
+#[unstable(feature = "volatile", reason = "recently added", issue = "31756")]
+pub unsafe fn read_volatile<T>(src: *const T) -> T {
+    intrinsics::volatile_load(src)
+}
+
+/// Performs a volatile write of a memory location with the given value without
+/// reading or dropping the old value.
+///
+/// Volatile operations are intended to act on I/O memory, and are guaranteed
+/// to not be elided or reordered by the compiler across other volatile
+/// operations. See the LLVM documentation on [[volatile]].
+///
+/// [volatile]: http://llvm.org/docs/LangRef.html#volatile-memory-accesses
+///
+/// # Safety
+///
+/// This operation is marked unsafe because it accepts a raw pointer.
+///
+/// It does not drop the contents of `dst`. This is safe, but it could leak
+/// allocations or resources, so care must be taken not to overwrite an object
+/// that should be dropped.
+///
+/// This is appropriate for initializing uninitialized memory, or overwriting
+/// memory that has previously been `read` from.
+#[inline]
+#[unstable(feature = "volatile", reason = "recently added", issue = "31756")]
+pub unsafe fn write_volatile<T>(dst: *mut T, src: T) {
+    intrinsics::volatile_store(dst, src);
+}
+
 #[lang = "const_ptr"]
 impl<T: ?Sized> *const T {
     /// Returns true if the pointer is null.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// let s: &str = "Follow the rabbit";
+    /// let ptr: *const u8 = s.as_ptr();
+    /// assert!(ptr.is_null() == false);
+    /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn is_null(self) -> bool where T: Sized {
-        self == 0 as *const T
+        self == null()
     }
 
     /// Returns `None` if the pointer is null, or else returns a reference to
@@ -192,10 +237,25 @@ impl<T: ?Sized> *const T {
     /// null-safety, it is important to note that this is still an unsafe
     /// operation because the returned value could be pointing to invalid
     /// memory.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```ignore
+    /// let val: *const u8 = &10u8 as *const u8;
+    ///
+    /// unsafe {
+    ///     if let Some(val_back) = val.as_ref() {
+    ///         println!("We got back the value: {}!", val_back);
+    ///     }
+    /// }
+    /// ```
     #[unstable(feature = "ptr_as_ref",
                reason = "Option is not clearly the right return type, and we \
                          may want to tie the return lifetime to a borrow of \
-                         the raw pointer")]
+                         the raw pointer",
+               issue = "27780")]
     #[inline]
     pub unsafe fn as_ref<'a>(&self) -> Option<&'a T> where T: Sized {
         if self.is_null() {
@@ -214,6 +274,20 @@ impl<T: ?Sized> *const T {
     /// byte past the end of an allocated object. If either pointer is out of
     /// bounds or arithmetic overflow occurs then
     /// any further use of the returned value will result in undefined behavior.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// let s: &str = "123";
+    /// let ptr: *const u8 = s.as_ptr();
+    ///
+    /// unsafe {
+    ///     println!("{}", *ptr.offset(1) as char);
+    ///     println!("{}", *ptr.offset(2) as char);
+    /// }
+    /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub unsafe fn offset(self, count: isize) -> *const T where T: Sized {
@@ -221,14 +295,23 @@ impl<T: ?Sized> *const T {
     }
 }
 
-#[stable(feature = "rust1", since = "1.0.0")]
 #[lang = "mut_ptr"]
 impl<T: ?Sized> *mut T {
     /// Returns true if the pointer is null.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// let mut s = [1, 2, 3];
+    /// let ptr: *mut u32 = s.as_mut_ptr();
+    /// assert!(ptr.is_null() == false);
+    /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn is_null(self) -> bool where T: Sized {
-        self == 0 as *mut T
+        self == null_mut()
     }
 
     /// Returns `None` if the pointer is null, or else returns a reference to
@@ -240,10 +323,25 @@ impl<T: ?Sized> *mut T {
     /// null-safety, it is important to note that this is still an unsafe
     /// operation because the returned value could be pointing to invalid
     /// memory.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```ignore
+    /// let val: *mut u8 = &mut 10u8 as *mut u8;
+    ///
+    /// unsafe {
+    ///     if let Some(val_back) = val.as_ref() {
+    ///         println!("We got back the value: {}!", val_back);
+    ///     }
+    /// }
+    /// ```
     #[unstable(feature = "ptr_as_ref",
                reason = "Option is not clearly the right return type, and we \
                          may want to tie the return lifetime to a borrow of \
-                         the raw pointer")]
+                         the raw pointer",
+               issue = "27780")]
     #[inline]
     pub unsafe fn as_ref<'a>(&self) -> Option<&'a T> where T: Sized {
         if self.is_null() {
@@ -259,8 +357,22 @@ impl<T: ?Sized> *mut T {
     /// # Safety
     ///
     /// The offset must be in-bounds of the object, or one-byte-past-the-end.
-    /// Otherwise `offset` invokes Undefined Behaviour, regardless of whether
+    /// Otherwise `offset` invokes Undefined Behavior, regardless of whether
     /// the pointer is used.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// let mut s = [1, 2, 3];
+    /// let ptr: *mut u32 = s.as_mut_ptr();
+    ///
+    /// unsafe {
+    ///     println!("{}", *ptr.offset(1));
+    ///     println!("{}", *ptr.offset(2));
+    /// }
+    /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub unsafe fn offset(self, count: isize) -> *mut T where T: Sized {
@@ -274,9 +386,19 @@ impl<T: ?Sized> *mut T {
     ///
     /// As with `as_ref`, this is unsafe because it cannot verify the validity
     /// of the returned pointer.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// let mut s = [1, 2, 3];
+    /// let ptr: *mut u32 = s.as_mut_ptr();
+    /// ```
     #[unstable(feature = "ptr_as_ref",
                reason = "return value does not necessarily convey all possible \
-                         information")]
+                         information",
+               issue = "27780")]
     #[inline]
     pub unsafe fn as_mut<'a>(&self) -> Option<&'a mut T> where T: Sized {
         if self.is_null() {
@@ -322,40 +444,89 @@ impl<T: ?Sized> Clone for *mut T {
     }
 }
 
-// Equality for extern "C" fn pointers
-mod externfnpointers {
-    use mem;
-    use cmp::PartialEq;
-
-    #[stable(feature = "rust1", since = "1.0.0")]
-    impl<_R> PartialEq for extern "C" fn() -> _R {
-        #[inline]
-        fn eq(&self, other: &extern "C" fn() -> _R) -> bool {
-            let self_: *const () = unsafe { mem::transmute(*self) };
-            let other_: *const () = unsafe { mem::transmute(*other) };
-            self_ == other_
+// Impls for function pointers
+macro_rules! fnptr_impls_safety_abi {
+    ($FnTy: ty, $($Arg: ident),*) => {
+        #[stable(feature = "rust1", since = "1.0.0")]
+        impl<Ret, $($Arg),*> Clone for $FnTy {
+            #[inline]
+            fn clone(&self) -> Self {
+                *self
+            }
         }
-    }
-    macro_rules! fnptreq {
-        ($($p:ident),*) => {
-            #[stable(feature = "rust1", since = "1.0.0")]
-            impl<_R,$($p),*> PartialEq for extern "C" fn($($p),*) -> _R {
-                #[inline]
-                fn eq(&self, other: &extern "C" fn($($p),*) -> _R) -> bool {
-                    let self_: *const () = unsafe { mem::transmute(*self) };
 
-                    let other_: *const () = unsafe { mem::transmute(*other) };
-                    self_ == other_
-                }
+        #[stable(feature = "fnptr_impls", since = "1.4.0")]
+        impl<Ret, $($Arg),*> PartialEq for $FnTy {
+            #[inline]
+            fn eq(&self, other: &Self) -> bool {
+                *self as usize == *other as usize
+            }
+        }
+
+        #[stable(feature = "fnptr_impls", since = "1.4.0")]
+        impl<Ret, $($Arg),*> Eq for $FnTy {}
+
+        #[stable(feature = "fnptr_impls", since = "1.4.0")]
+        impl<Ret, $($Arg),*> PartialOrd for $FnTy {
+            #[inline]
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                (*self as usize).partial_cmp(&(*other as usize))
+            }
+        }
+
+        #[stable(feature = "fnptr_impls", since = "1.4.0")]
+        impl<Ret, $($Arg),*> Ord for $FnTy {
+            #[inline]
+            fn cmp(&self, other: &Self) -> Ordering {
+                (*self as usize).cmp(&(*other as usize))
+            }
+        }
+
+        #[stable(feature = "fnptr_impls", since = "1.4.0")]
+        impl<Ret, $($Arg),*> hash::Hash for $FnTy {
+            fn hash<HH: hash::Hasher>(&self, state: &mut HH) {
+                state.write_usize(*self as usize)
+            }
+        }
+
+        #[stable(feature = "fnptr_impls", since = "1.4.0")]
+        impl<Ret, $($Arg),*> fmt::Pointer for $FnTy {
+            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                fmt::Pointer::fmt(&(*self as *const ()), f)
+            }
+        }
+
+        #[stable(feature = "fnptr_impls", since = "1.4.0")]
+        impl<Ret, $($Arg),*> fmt::Debug for $FnTy {
+            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                fmt::Pointer::fmt(&(*self as *const ()), f)
             }
         }
     }
-    fnptreq! { A }
-    fnptreq! { A,B }
-    fnptreq! { A,B,C }
-    fnptreq! { A,B,C,D }
-    fnptreq! { A,B,C,D,E }
 }
+
+macro_rules! fnptr_impls_args {
+    ($($Arg: ident),*) => {
+        fnptr_impls_safety_abi! { extern "Rust" fn($($Arg),*) -> Ret, $($Arg),* }
+        fnptr_impls_safety_abi! { extern "C" fn($($Arg),*) -> Ret, $($Arg),* }
+        fnptr_impls_safety_abi! { unsafe extern "Rust" fn($($Arg),*) -> Ret, $($Arg),* }
+        fnptr_impls_safety_abi! { unsafe extern "C" fn($($Arg),*) -> Ret, $($Arg),* }
+    }
+}
+
+fnptr_impls_args! { }
+fnptr_impls_args! { A }
+fnptr_impls_args! { A, B }
+fnptr_impls_args! { A, B, C }
+fnptr_impls_args! { A, B, C, D }
+fnptr_impls_args! { A, B, C, D, E }
+fnptr_impls_args! { A, B, C, D, E, F }
+fnptr_impls_args! { A, B, C, D, E, F, G }
+fnptr_impls_args! { A, B, C, D, E, F, G, H }
+fnptr_impls_args! { A, B, C, D, E, F, G, H, I }
+fnptr_impls_args! { A, B, C, D, E, F, G, H, I, J }
+fnptr_impls_args! { A, B, C, D, E, F, G, H, I, J, K }
+fnptr_impls_args! { A, B, C, D, E, F, G, H, I, J, K, L }
 
 // Comparison for pointers
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -426,7 +597,7 @@ impl<T: ?Sized> PartialOrd for *mut T {
     fn ge(&self, other: &*mut T) -> bool { *self >= *other }
 }
 
-/// A wrapper around a raw `*mut T` that indicates that the possessor
+/// A wrapper around a raw non-null `*mut T` that indicates that the possessor
 /// of this wrapper owns the referent. This in turn implies that the
 /// `Unique<T>` is `Send`/`Sync` if `T` is `Send`/`Sync`, unlike a raw
 /// `*mut T` (which conveys no particular ownership semantics).  It
@@ -434,7 +605,9 @@ impl<T: ?Sized> PartialOrd for *mut T {
 /// modified without a unique path to the `Unique` reference. Useful
 /// for building abstractions like `Vec<T>` or `Box<T>`, which
 /// internally use raw pointers to manage the memory that they own.
-#[unstable(feature = "unique", reason = "needs an RFC to flesh out design")]
+#[allow(missing_debug_implementations)]
+#[unstable(feature = "unique", reason = "needs an RFC to flesh out design",
+           issue = "27730")]
 pub struct Unique<T: ?Sized> {
     pointer: NonZero<*const T>,
     // NOTE: this marker has no consequences for variance, but is necessary
@@ -449,20 +622,24 @@ pub struct Unique<T: ?Sized> {
 /// reference is unaliased. Note that this aliasing invariant is
 /// unenforced by the type system; the abstraction using the
 /// `Unique` must enforce it.
-#[unstable(feature = "unique")]
+#[unstable(feature = "unique", issue = "27730")]
 unsafe impl<T: Send + ?Sized> Send for Unique<T> { }
 
 /// `Unique` pointers are `Sync` if `T` is `Sync` because the data they
 /// reference is unaliased. Note that this aliasing invariant is
 /// unenforced by the type system; the abstraction using the
 /// `Unique` must enforce it.
-#[unstable(feature = "unique")]
+#[unstable(feature = "unique", issue = "27730")]
 unsafe impl<T: Sync + ?Sized> Sync for Unique<T> { }
 
-#[unstable(feature = "unique")]
+#[unstable(feature = "unique", issue = "27730")]
 impl<T: ?Sized> Unique<T> {
     /// Creates a new `Unique`.
-    pub unsafe fn new(ptr: *mut T) -> Unique<T> {
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be non-null.
+    pub const unsafe fn new(ptr: *mut T) -> Unique<T> {
         Unique { pointer: NonZero::new(ptr), _marker: PhantomData }
     }
 
@@ -477,18 +654,90 @@ impl<T: ?Sized> Unique<T> {
     }
 }
 
-#[unstable(feature = "unique")]
+#[unstable(feature = "unique", issue = "27730")]
+impl<T: ?Sized, U: ?Sized> CoerceUnsized<Unique<U>> for Unique<T> where T: Unsize<U> { }
+
+#[unstable(feature = "unique", issue= "27730")]
 impl<T:?Sized> Deref for Unique<T> {
     type Target = *mut T;
 
     #[inline]
-    fn deref<'a>(&'a self) -> &'a *mut T {
+    fn deref(&self) -> &*mut T {
         unsafe { mem::transmute(&*self.pointer) }
     }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T> fmt::Pointer for Unique<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Pointer::fmt(&*self.pointer, f)
+    }
+}
+
+/// A wrapper around a raw non-null `*mut T` that indicates that the possessor
+/// of this wrapper has shared ownership of the referent. Useful for
+/// building abstractions like `Rc<T>` or `Arc<T>`, which internally
+/// use raw pointers to manage the memory that they own.
+#[allow(missing_debug_implementations)]
+#[unstable(feature = "shared", reason = "needs an RFC to flesh out design",
+           issue = "27730")]
+pub struct Shared<T: ?Sized> {
+    pointer: NonZero<*const T>,
+    // NOTE: this marker has no consequences for variance, but is necessary
+    // for dropck to understand that we logically own a `T`.
+    //
+    // For details, see:
+    // https://github.com/rust-lang/rfcs/blob/master/text/0769-sound-generic-drop.md#phantom-data
+    _marker: PhantomData<T>,
+}
+
+/// `Shared` pointers are not `Send` because the data they reference may be aliased.
+// NB: This impl is unnecessary, but should provide better error messages.
+#[unstable(feature = "shared", issue = "27730")]
+impl<T: ?Sized> !Send for Shared<T> { }
+
+/// `Shared` pointers are not `Sync` because the data they reference may be aliased.
+// NB: This impl is unnecessary, but should provide better error messages.
+#[unstable(feature = "shared", issue = "27730")]
+impl<T: ?Sized> !Sync for Shared<T> { }
+
+#[unstable(feature = "shared", issue = "27730")]
+impl<T: ?Sized> Shared<T> {
+    /// Creates a new `Shared`.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must be non-null.
+    pub unsafe fn new(ptr: *mut T) -> Self {
+        Shared { pointer: NonZero::new(ptr), _marker: PhantomData }
+    }
+}
+
+#[unstable(feature = "shared", issue = "27730")]
+impl<T: ?Sized> Clone for Shared<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+#[unstable(feature = "shared", issue = "27730")]
+impl<T: ?Sized> Copy for Shared<T> { }
+
+#[unstable(feature = "shared", issue = "27730")]
+impl<T: ?Sized, U: ?Sized> CoerceUnsized<Shared<U>> for Shared<T> where T: Unsize<U> { }
+
+#[unstable(feature = "shared", issue = "27730")]
+impl<T: ?Sized> Deref for Shared<T> {
+    type Target = *mut T;
+
+    #[inline]
+    fn deref(&self) -> &*mut T {
+        unsafe { mem::transmute(&*self.pointer) }
+    }
+}
+
+#[unstable(feature = "shared", issue = "27730")]
+impl<T> fmt::Pointer for Shared<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         fmt::Pointer::fmt(&*self.pointer, f)
     }

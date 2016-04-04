@@ -25,7 +25,9 @@ use std::path::Path;
 use syntax::parse;
 use syntax::parse::lexer;
 use rustc::session::{self, config};
+use rustc::middle::cstore::DummyCrateStore;
 
+use std::rc::Rc;
 use syntax::ast;
 use syntax::ast::Name;
 use syntax::codemap;
@@ -35,7 +37,7 @@ use syntax::parse::lexer::TokenAndSpan;
 
 fn parse_token_list(file: &str) -> HashMap<String, token::Token> {
     fn id() -> token::Token {
-        token::Ident(ast::Ident { name: Name(0), ctxt: 0, }, token::Plain)
+        token::Ident(ast::Ident::with_empty_ctxt(Name(0)), token::Plain)
     }
 
     let mut res = HashMap::new();
@@ -75,7 +77,7 @@ fn parse_token_list(file: &str) -> HashMap<String, token::Token> {
             "RPAREN"            => token::CloseDelim(token::Paren),
             "SLASH"             => token::BinOp(token::Slash),
             "COMMA"             => token::Comma,
-            "LIFETIME"          => token::Lifetime(ast::Ident { name: Name(0), ctxt: 0 }),
+            "LIFETIME"          => token::Lifetime(ast::Ident::with_empty_ctxt(Name(0))),
             "CARET"             => token::BinOp(token::Caret),
             "TILDE"             => token::Tilde,
             "IDENT"             => id(),
@@ -107,8 +109,8 @@ fn parse_token_list(file: &str) -> HashMap<String, token::Token> {
             "OR"                => token::BinOp(token::Or),
             "GT"                => token::Gt,
             "LE"                => token::Le,
-            "LIT_BINARY"        => token::Literal(token::Binary(Name(0)), None),
-            "LIT_BINARY_RAW"    => token::Literal(token::BinaryRaw(Name(0), 0), None),
+            "LIT_BYTE_STR"      => token::Literal(token::ByteStr(Name(0)), None),
+            "LIT_BYTE_STR_RAW"  => token::Literal(token::ByteStrRaw(Name(0), 0), None),
             "QUESTION"          => token::Question,
             "SHEBANG"           => token::Shebang(Name(0)),
             _                   => continue,
@@ -137,8 +139,8 @@ fn str_to_binop(s: &str) -> token::BinOpToken {
     }
 }
 
-/// Assuming a string/binary literal, strip out the leading/trailing
-/// hashes and surrounding quotes/raw/binary prefix.
+/// Assuming a string/byte string literal, strip out the leading/trailing
+/// hashes and surrounding quotes/raw/byte prefix.
 fn fix(mut lit: &str) -> ast::Name {
     if lit.char_at(0) == 'r' {
         if lit.char_at(1) == 'b' {
@@ -205,12 +207,12 @@ fn parse_antlr_token(s: &str, tokens: &HashMap<String, token::Token>, surrogate_
         token::DocComment(..)      => token::DocComment(nm),
         token::Literal(token::Integer(..), n)   => token::Literal(token::Integer(nm), n),
         token::Literal(token::Float(..), n)     => token::Literal(token::Float(nm), n),
-        token::Literal(token::Binary(..), n)    => token::Literal(token::Binary(nm), n),
-        token::Literal(token::BinaryRaw(..), n) => token::Literal(token::BinaryRaw(fix(content),
+        token::Literal(token::ByteStr(..), n)    => token::Literal(token::ByteStr(nm), n),
+        token::Literal(token::ByteStrRaw(..), n) => token::Literal(token::ByteStrRaw(fix(content),
                                                                                 count(content)), n),
-        token::Ident(..)           => token::Ident(ast::Ident { name: nm, ctxt: 0 },
+        token::Ident(..)           => token::Ident(ast::Ident::with_empty_ctxt(nm),
                                                    token::ModName),
-        token::Lifetime(..)        => token::Lifetime(ast::Ident { name: nm, ctxt: 0 }),
+        token::Lifetime(..)        => token::Lifetime(ast::Ident::with_empty_ctxt(nm)),
         ref t => t.clone()
     };
 
@@ -286,7 +288,8 @@ fn main() {
 
     let options = config::basic_options();
     let session = session::build_session(options, None,
-                                         syntax::diagnostics::registry::Registry::new(&[]));
+                                         syntax::diagnostics::registry::Registry::new(&[]),
+                                         Rc::new(DummyCrateStore));
     let filemap = session.parse_sess.codemap().new_filemap(String::from("<n/a>"), code);
     let mut lexer = lexer::StringReader::new(session.diagnostic(), filemap);
     let cm = session.codemap();
@@ -340,8 +343,8 @@ fn main() {
             token::Literal(token::Float(..), _),
             token::Literal(token::Str_(..), _),
             token::Literal(token::StrRaw(..), _),
-            token::Literal(token::Binary(..), _),
-            token::Literal(token::BinaryRaw(..), _),
+            token::Literal(token::ByteStr(..), _),
+            token::Literal(token::ByteStrRaw(..), _),
             token::Ident(..),
             token::Lifetime(..),
             token::Interpolated(..),

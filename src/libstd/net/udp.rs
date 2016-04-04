@@ -8,14 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![unstable(feature = "udp", reason = "remaining functions have not been \
-                                       scrutinized enough to be stabilized")]
-
-use prelude::v1::*;
-
 use fmt;
 use io::{self, Error, ErrorKind};
-use net::{ToSocketAddrs, SocketAddr, IpAddr};
+use net::{ToSocketAddrs, SocketAddr, Ipv4Addr, Ipv6Addr};
 use sys_common::net as net_imp;
 use sys_common::{AsInner, FromInner, IntoInner};
 use time::Duration;
@@ -32,18 +27,19 @@ use time::Duration;
 /// use std::net::UdpSocket;
 ///
 /// # fn foo() -> std::io::Result<()> {
-/// let mut socket = try!(UdpSocket::bind("127.0.0.1:34254"));
+/// {
+///     let mut socket = try!(UdpSocket::bind("127.0.0.1:34254"));
 ///
-/// let mut buf = [0; 10];
-/// let (amt, src) = try!(socket.recv_from(&mut buf));
+///     // read from the socket
+///     let mut buf = [0; 10];
+///     let (amt, src) = try!(socket.recv_from(&mut buf));
 ///
-/// // Send a reply to the socket we received data from
-/// let buf = &mut buf[..amt];
-/// buf.reverse();
-/// try!(socket.send_to(buf, &src));
-///
-/// drop(socket); // close the socket
-/// # Ok(())
+///     // send a reply to the socket we received data from
+///     let buf = &mut buf[..amt];
+///     buf.reverse();
+///     try!(socket.send_to(buf, &src));
+///     # Ok(())
+/// } // the socket is closed here
 /// # }
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -74,7 +70,7 @@ impl UdpSocket {
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn send_to<A: ToSocketAddrs>(&self, buf: &[u8], addr: A)
                                      -> io::Result<usize> {
-        match try!(addr.to_socket_addrs()).next() {
+        match addr.to_socket_addrs()?.next() {
             Some(addr) => self.0.send_to(buf, &addr),
             None => Err(Error::new(ErrorKind::InvalidInput,
                                    "no addresses to send data to")),
@@ -97,44 +93,18 @@ impl UdpSocket {
         self.0.duplicate().map(UdpSocket)
     }
 
-    /// Sets the broadcast flag on or off.
-    pub fn set_broadcast(&self, on: bool) -> io::Result<()> {
-        self.0.set_broadcast(on)
-    }
-
-    /// Sets the multicast loop flag to the specified value.
-    ///
-    /// This lets multicast packets loop back to local sockets (if enabled)
-    pub fn set_multicast_loop(&self, on: bool) -> io::Result<()> {
-        self.0.set_multicast_loop(on)
-    }
-
-    /// Joins a multicast IP address (becomes a member of it).
-    pub fn join_multicast(&self, multi: &IpAddr) -> io::Result<()> {
-        self.0.join_multicast(multi)
-    }
-
-    /// Leaves a multicast IP address (drops membership from it).
-    pub fn leave_multicast(&self, multi: &IpAddr) -> io::Result<()> {
-        self.0.leave_multicast(multi)
-    }
-
-    /// Sets the multicast TTL.
-    pub fn set_multicast_time_to_live(&self, ttl: i32) -> io::Result<()> {
-        self.0.multicast_time_to_live(ttl)
-    }
-
-    /// Sets this socket's TTL.
-    pub fn set_time_to_live(&self, ttl: i32) -> io::Result<()> {
-        self.0.time_to_live(ttl)
-    }
-
     /// Sets the read timeout to the timeout specified.
     ///
     /// If the value specified is `None`, then `read` calls will block
     /// indefinitely. It is an error to pass the zero `Duration` to this
     /// method.
-    #[unstable(feature = "socket_timeout", reason = "RFC 1047 - recently added")]
+    ///
+    /// # Note
+    ///
+    /// Platforms may return a different error code whenever a read times out as
+    /// a result of setting this option. For example Unix typically returns an
+    /// error of the kind `WouldBlock`, but Windows may return `TimedOut`.
+    #[stable(feature = "socket_timeout", since = "1.4.0")]
     pub fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
         self.0.set_read_timeout(dur)
     }
@@ -144,7 +114,13 @@ impl UdpSocket {
     /// If the value specified is `None`, then `write` calls will block
     /// indefinitely. It is an error to pass the zero `Duration` to this
     /// method.
-    #[unstable(feature = "socket_timeout", reason = "RFC 1047 - recently added")]
+    ///
+    /// # Note
+    ///
+    /// Platforms may return a different error code whenever a write times out
+    /// as a result of setting this option. For example Unix typically returns
+    /// an error of the kind `WouldBlock`, but Windows may return `TimedOut`.
+    #[stable(feature = "socket_timeout", since = "1.4.0")]
     pub fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
         self.0.set_write_timeout(dur)
     }
@@ -152,7 +128,7 @@ impl UdpSocket {
     /// Returns the read timeout of this socket.
     ///
     /// If the timeout is `None`, then `read` calls will block indefinitely.
-    #[unstable(feature = "socket_timeout", reason = "RFC 1047 - recently added")]
+    #[stable(feature = "socket_timeout", since = "1.4.0")]
     pub fn read_timeout(&self) -> io::Result<Option<Duration>> {
         self.0.read_timeout()
     }
@@ -160,9 +136,224 @@ impl UdpSocket {
     /// Returns the write timeout of this socket.
     ///
     /// If the timeout is `None`, then `write` calls will block indefinitely.
-    #[unstable(feature = "socket_timeout", reason = "RFC 1047 - recently added")]
+    #[stable(feature = "socket_timeout", since = "1.4.0")]
     pub fn write_timeout(&self) -> io::Result<Option<Duration>> {
         self.0.write_timeout()
+    }
+
+    /// Sets the value of the `SO_BROADCAST` option for this socket.
+    ///
+    /// When enabled, this socket is allowed to send packets to a broadcast
+    /// address.
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn set_broadcast(&self, broadcast: bool) -> io::Result<()> {
+        self.0.set_broadcast(broadcast)
+    }
+
+    /// Gets the value of the `SO_BROADCAST` option for this socket.
+    ///
+    /// For more information about this option, see
+    /// [`set_broadcast`][link].
+    ///
+    /// [link]: #method.set_broadcast
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn broadcast(&self) -> io::Result<bool> {
+        self.0.broadcast()
+    }
+
+    /// Sets the value of the `IP_MULTICAST_LOOP` option for this socket.
+    ///
+    /// If enabled, multicast packets will be looped back to the local socket.
+    /// Note that this may not have any affect on IPv6 sockets.
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn set_multicast_loop_v4(&self, multicast_loop_v4: bool) -> io::Result<()> {
+        self.0.set_multicast_loop_v4(multicast_loop_v4)
+    }
+
+    /// Gets the value of the `IP_MULTICAST_LOOP` option for this socket.
+    ///
+    /// For more information about this option, see
+    /// [`set_multicast_loop_v4`][link].
+    ///
+    /// [link]: #method.set_multicast_loop_v4
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn multicast_loop_v4(&self) -> io::Result<bool> {
+        self.0.multicast_loop_v4()
+    }
+
+    /// Sets the value of the `IP_MULTICAST_TTL` option for this socket.
+    ///
+    /// Indicates the time-to-live value of outgoing multicast packets for
+    /// this socket. The default value is 1 which means that multicast packets
+    /// don't leave the local network unless explicitly requested.
+    ///
+    /// Note that this may not have any affect on IPv6 sockets.
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn set_multicast_ttl_v4(&self, multicast_ttl_v4: u32) -> io::Result<()> {
+        self.0.set_multicast_ttl_v4(multicast_ttl_v4)
+    }
+
+    /// Gets the value of the `IP_MULTICAST_TTL` option for this socket.
+    ///
+    /// For more information about this option, see
+    /// [`set_multicast_ttl_v4`][link].
+    ///
+    /// [link]: #method.set_multicast_ttl_v4
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn multicast_ttl_v4(&self) -> io::Result<u32> {
+        self.0.multicast_ttl_v4()
+    }
+
+    /// Sets the value of the `IPV6_MULTICAST_LOOP` option for this socket.
+    ///
+    /// Controls whether this socket sees the multicast packets it sends itself.
+    /// Note that this may not have any affect on IPv4 sockets.
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn set_multicast_loop_v6(&self, multicast_loop_v6: bool) -> io::Result<()> {
+        self.0.set_multicast_loop_v6(multicast_loop_v6)
+    }
+
+    /// Gets the value of the `IPV6_MULTICAST_LOOP` option for this socket.
+    ///
+    /// For more information about this option, see
+    /// [`set_multicast_loop_v6`][link].
+    ///
+    /// [link]: #method.set_multicast_loop_v6
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn multicast_loop_v6(&self) -> io::Result<bool> {
+        self.0.multicast_loop_v6()
+    }
+
+    /// Sets the value for the `IP_TTL` option on this socket.
+    ///
+    /// This value sets the time-to-live field that is used in every packet sent
+    /// from this socket.
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn set_ttl(&self, ttl: u32) -> io::Result<()> {
+        self.0.set_ttl(ttl)
+    }
+
+    /// Gets the value of the `IP_TTL` option for this socket.
+    ///
+    /// For more information about this option, see [`set_ttl`][link].
+    ///
+    /// [link]: #method.set_ttl
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn ttl(&self) -> io::Result<u32> {
+        self.0.ttl()
+    }
+
+    /// Sets the value for the `IPV6_V6ONLY` option on this socket.
+    ///
+    /// If this is set to `true` then the socket is restricted to sending and
+    /// receiving IPv6 packets only. If this is the case, an IPv4 and an IPv6
+    /// application can each bind the same port at the same time.
+    ///
+    /// If this is set to `false` then the socket can be used to send and
+    /// receive packets from an IPv4-mapped IPv6 address.
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn set_only_v6(&self, only_v6: bool) -> io::Result<()> {
+        self.0.set_only_v6(only_v6)
+    }
+
+    /// Gets the value of the `IPV6_V6ONLY` option for this socket.
+    ///
+    /// For more information about this option, see [`set_only_v6`][link].
+    ///
+    /// [link]: #method.set_only_v6
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn only_v6(&self) -> io::Result<bool> {
+        self.0.only_v6()
+    }
+
+    /// Executes an operation of the `IP_ADD_MEMBERSHIP` type.
+    ///
+    /// This function specifies a new multicast group for this socket to join.
+    /// The address must be a valid multicast address, and `interface` is the
+    /// address of the local interface with which the system should join the
+    /// multicast group. If it's equal to `INADDR_ANY` then an appropriate
+    /// interface is chosen by the system.
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn join_multicast_v4(&self, multiaddr: &Ipv4Addr, interface: &Ipv4Addr) -> io::Result<()> {
+        self.0.join_multicast_v4(multiaddr, interface)
+    }
+
+    /// Executes an operation of the `IPV6_ADD_MEMBERSHIP` type.
+    ///
+    /// This function specifies a new multicast group for this socket to join.
+    /// The address must be a valid multicast address, and `interface` is the
+    /// index of the interface to join/leave (or 0 to indicate any interface).
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn join_multicast_v6(&self, multiaddr: &Ipv6Addr, interface: u32) -> io::Result<()> {
+        self.0.join_multicast_v6(multiaddr, interface)
+    }
+
+    /// Executes an operation of the `IP_DROP_MEMBERSHIP` type.
+    ///
+    /// For more information about this option, see
+    /// [`join_multicast_v4`][link].
+    ///
+    /// [link]: #method.join_multicast_v4
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn leave_multicast_v4(&self, multiaddr: &Ipv4Addr, interface: &Ipv4Addr) -> io::Result<()> {
+        self.0.leave_multicast_v4(multiaddr, interface)
+    }
+
+    /// Executes an operation of the `IPV6_DROP_MEMBERSHIP` type.
+    ///
+    /// For more information about this option, see
+    /// [`join_multicast_v6`][link].
+    ///
+    /// [link]: #method.join_multicast_v6
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn leave_multicast_v6(&self, multiaddr: &Ipv6Addr, interface: u32) -> io::Result<()> {
+        self.0.leave_multicast_v6(multiaddr, interface)
+    }
+
+    /// Get the value of the `SO_ERROR` option on this socket.
+    ///
+    /// This will retrieve the stored error in the underlying socket, clearing
+    /// the field in the process. This can be useful for checking errors between
+    /// calls.
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn take_error(&self) -> io::Result<Option<io::Error>> {
+        self.0.take_error()
+    }
+
+    /// Connects this UDP socket to a remote address, allowing the `send` and
+    /// `recv` syscalls to be used to send data and also applies filters to only
+    /// receive data from the specified address.
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn connect<A: ToSocketAddrs>(&self, addr: A) -> io::Result<()> {
+        super::each_addr(addr, |addr| self.0.connect(addr))
+    }
+
+    /// Sends data on the socket to the remote address to which it is connected.
+    ///
+    /// The `connect` method will connect this socket to a remote address. This
+    /// method will fail if the socket is not connected.
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn send(&self, buf: &[u8]) -> io::Result<usize> {
+        self.0.send(buf)
+    }
+
+    /// Receives data on the socket from the remote address to which it is
+    /// connected.
+    ///
+    /// The `connect` method will connect this socket to a remote address. This
+    /// method will fail if the socket is not connected.
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn recv(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.recv(buf)
+    }
+
+    /// Moves this TCP stream into or out of nonblocking mode.
+    ///
+    /// On Unix this corresponds to calling fcntl, and on Windows this
+    /// corresponds to calling ioctlsocket.
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        self.0.set_nonblocking(nonblocking)
     }
 }
 
@@ -178,6 +369,7 @@ impl IntoInner<net_imp::UdpSocket> for UdpSocket {
     fn into_inner(self) -> net_imp::UdpSocket { self.0 }
 }
 
+#[stable(feature = "rust1", since = "1.0.0")]
 impl fmt::Debug for UdpSocket {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         self.0.fmt(f)
@@ -193,7 +385,7 @@ mod tests {
     use net::test::{next_test_ip4, next_test_ip6};
     use sync::mpsc::channel;
     use sys_common::AsInner;
-    use time::Duration;
+    use time::{Instant, Duration};
     use thread;
 
     fn each_ip(f: &mut FnMut(SocketAddr, SocketAddr)) {
@@ -210,14 +402,13 @@ mod tests {
         }
     }
 
-    // FIXME #11530 this fails on android because tests are run as root
-    #[cfg_attr(any(windows, target_os = "android"), ignore)]
     #[test]
     fn bind_error() {
-        let addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 1);
-        match UdpSocket::bind(&addr) {
+        match UdpSocket::bind("1.1.1.1:9999") {
             Ok(..) => panic!(),
-            Err(e) => assert_eq!(e.kind(), ErrorKind::PermissionDenied),
+            Err(e) => {
+                assert_eq!(e.kind(), ErrorKind::AddrNotAvailable)
+            }
         }
     }
 
@@ -395,23 +586,22 @@ mod tests {
     fn test_read_timeout() {
         let addr = next_test_ip4();
 
-        let mut stream = t!(UdpSocket::bind(&addr));
+        let stream = t!(UdpSocket::bind(&addr));
         t!(stream.set_read_timeout(Some(Duration::from_millis(1000))));
 
         let mut buf = [0; 10];
-        let wait = Duration::span(|| {
-            let kind = stream.recv_from(&mut buf).err().expect("expected error").kind();
-            assert!(kind == ErrorKind::WouldBlock || kind == ErrorKind::TimedOut);
-        });
-        assert!(wait > Duration::from_millis(400));
-        assert!(wait < Duration::from_millis(1600));
+
+        let start = Instant::now();
+        let kind = stream.recv_from(&mut buf).err().expect("expected error").kind();
+        assert!(kind == ErrorKind::WouldBlock || kind == ErrorKind::TimedOut);
+        assert!(start.elapsed() > Duration::from_millis(400));
     }
 
     #[test]
     fn test_read_with_timeout() {
         let addr = next_test_ip4();
 
-        let mut stream = t!(UdpSocket::bind(&addr));
+        let stream = t!(UdpSocket::bind(&addr));
         t!(stream.set_read_timeout(Some(Duration::from_millis(1000))));
 
         t!(stream.send_to(b"hello world", &addr));
@@ -420,11 +610,45 @@ mod tests {
         t!(stream.recv_from(&mut buf));
         assert_eq!(b"hello world", &buf[..]);
 
-        let wait = Duration::span(|| {
-            let kind = stream.recv_from(&mut buf).err().expect("expected error").kind();
-            assert!(kind == ErrorKind::WouldBlock || kind == ErrorKind::TimedOut);
-        });
-        assert!(wait > Duration::from_millis(400));
-        assert!(wait < Duration::from_millis(1600));
+        let start = Instant::now();
+        let kind = stream.recv_from(&mut buf).err().expect("expected error").kind();
+        assert!(kind == ErrorKind::WouldBlock || kind == ErrorKind::TimedOut);
+        assert!(start.elapsed() > Duration::from_millis(400));
+    }
+
+    #[test]
+    fn connect_send_recv() {
+        let addr = next_test_ip4();
+
+        let socket = t!(UdpSocket::bind(&addr));
+        t!(socket.connect(addr));
+
+        t!(socket.send(b"hello world"));
+
+        let mut buf = [0; 11];
+        t!(socket.recv(&mut buf));
+        assert_eq!(b"hello world", &buf[..]);
+    }
+
+    #[test]
+    fn ttl() {
+        let ttl = 100;
+
+        let addr = next_test_ip4();
+
+        let stream = t!(UdpSocket::bind(&addr));
+
+        t!(stream.set_ttl(ttl));
+        assert_eq!(ttl, t!(stream.ttl()));
+    }
+
+    #[test]
+    fn set_nonblocking() {
+        let addr = next_test_ip4();
+
+        let stream = t!(UdpSocket::bind(&addr));
+
+        t!(stream.set_nonblocking(true));
+        t!(stream.set_nonblocking(false));
     }
 }

@@ -32,15 +32,22 @@
 /// Note that unlike array expressions this syntax supports all elements
 /// which implement `Clone` and the number of elements doesn't have to be
 /// a constant.
+///
+/// This will use `clone()` to duplicate an expression, so one should be careful
+/// using this with types having a nonstandard `Clone` implementation. For
+/// example, `vec![Rc::new(1); 5]` will create a vector of five references
+/// to the same boxed integer value, not five references pointing to independently
+/// boxed integers.
 #[cfg(not(test))]
 #[macro_export]
 #[stable(feature = "rust1", since = "1.0.0")]
+#[allow_internal_unstable]
 macro_rules! vec {
     ($elem:expr; $n:expr) => (
         $crate::vec::from_elem($elem, $n)
     );
     ($($x:expr),*) => (
-        <[_]>::into_vec($crate::boxed::Box::new([$($x),*]))
+        <[_]>::into_vec(box [$($x),*])
     );
     ($($x:expr,)*) => (vec![$($x),*])
 }
@@ -55,7 +62,7 @@ macro_rules! vec {
         $crate::vec::from_elem($elem, $n)
     );
     ($($x:expr),*) => (
-        $crate::slice::into_vec($crate::boxed::Box::new([$($x),*]))
+        $crate::slice::into_vec(box [$($x),*])
     );
     ($($x:expr,)*) => (vec![$($x),*])
 }

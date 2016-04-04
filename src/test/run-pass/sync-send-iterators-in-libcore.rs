@@ -14,11 +14,10 @@
 #![feature(iter_empty)]
 #![feature(iter_once)]
 #![feature(iter_unfold)]
-#![feature(range_inclusive)]
 #![feature(step_by)]
 #![feature(str_escape)]
 
-use std::iter::{empty, once, range_inclusive, repeat, Unfold};
+use std::iter::{empty, once, repeat};
 
 fn is_sync<T>(_: T) where T: Sync {}
 fn is_send<T>(_: T) where T: Send {}
@@ -97,9 +96,7 @@ fn main() {
                    fuse,
                    inspect(|_| ()));
 
-    is_sync_send!(Unfold::new(Some(1), |&mut v| v));
     is_sync_send!((1..).step_by(2));
-    is_sync_send!(range_inclusive(1, 1));
     is_sync_send!((1..2).step_by(2));
     is_sync_send!((1..2));
     is_sync_send!((1..));

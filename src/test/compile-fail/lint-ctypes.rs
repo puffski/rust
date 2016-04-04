@@ -13,8 +13,8 @@
 
 extern crate libc;
 
-trait Mirror { type It; }
-impl<T> Mirror for T { type It = Self; }
+trait Mirror { type It: ?Sized; }
+impl<T: ?Sized> Mirror for T { type It = Self; }
 #[repr(C)]
 pub struct StructWithProjection(*mut <StructWithProjection as Mirror>::It);
 #[repr(C)]
@@ -26,12 +26,12 @@ pub type I32Pair = (i32, i32);
 pub struct ZeroSize;
 pub type RustFn = fn();
 pub type RustBadRet = extern fn() -> Box<u32>;
+pub type CVoidRet = ();
+pub struct Foo;
 
 extern {
-    pub fn bare_type1(size: isize); //~ ERROR: found Rust type
-    pub fn bare_type2(size: usize); //~ ERROR: found Rust type
-    pub fn ptr_type1(size: *const isize); //~ ERROR: found Rust type
-    pub fn ptr_type2(size: *const usize); //~ ERROR: found Rust type
+    pub fn ptr_type1(size: *const Foo); //~ ERROR: found struct without
+    pub fn ptr_type2(size: *const Foo); //~ ERROR: found struct without
     pub fn slice_type(p: &[u32]); //~ ERROR: found Rust slice type
     pub fn str_type(p: &str); //~ ERROR: found Rust type
     pub fn box_type(p: Box<u32>); //~ ERROR found Rust type
@@ -52,6 +52,10 @@ extern {
     pub fn good6(s: StructWithProjectionAndLifetime);
     pub fn good7(fptr: extern fn() -> ());
     pub fn good8(fptr: extern fn() -> !);
+    pub fn good9() -> ();
+    pub fn good10() -> CVoidRet;
+    pub fn good11(size: isize);
+    pub fn good12(size: usize);
 }
 
 fn main() {

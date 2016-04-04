@@ -13,11 +13,8 @@
 //!
 //! Obsolete syntax that becomes too hard to parse can be removed.
 
-use ast::{Expr, ExprTup};
 use codemap::Span;
 use parse::parser;
-use parse::token;
-use ptr::P;
 
 /// The specific types of unsupported syntax
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
@@ -29,17 +26,12 @@ pub enum ObsoleteSyntax {
 pub trait ParserObsoleteMethods {
     /// Reports an obsolete syntax non-fatal error.
     fn obsolete(&mut self, sp: Span, kind: ObsoleteSyntax);
-    /// Reports an obsolete syntax non-fatal error, and returns
-    /// a placeholder expression
-    fn obsolete_expr(&mut self, sp: Span, kind: ObsoleteSyntax) -> P<Expr>;
     fn report(&mut self,
               sp: Span,
               kind: ObsoleteSyntax,
               kind_str: &str,
               desc: &str,
               error: bool);
-    fn is_obsolete_ident(&mut self, ident: &str) -> bool;
-    fn eat_obsolete_ident(&mut self, ident: &str) -> bool;
 }
 
 impl<'a> ParserObsoleteMethods for parser::Parser<'a> {
@@ -61,50 +53,23 @@ impl<'a> ParserObsoleteMethods for parser::Parser<'a> {
         self.report(sp, kind, kind_str, desc, error);
     }
 
-    /// Reports an obsolete syntax non-fatal error, and returns
-    /// a placeholder expression
-    fn obsolete_expr(&mut self, sp: Span, kind: ObsoleteSyntax) -> P<Expr> {
-        self.obsolete(sp, kind);
-        self.mk_expr(sp.lo, sp.hi, ExprTup(vec![]))
-    }
-
     fn report(&mut self,
               sp: Span,
               kind: ObsoleteSyntax,
               kind_str: &str,
               desc: &str,
               error: bool) {
-        if error {
-            self.span_err(sp, &format!("obsolete syntax: {}", kind_str));
+        let mut err = if error {
+            self.diagnostic().struct_span_err(sp, &format!("obsolete syntax: {}", kind_str))
         } else {
-            self.span_warn(sp, &format!("obsolete syntax: {}", kind_str));
-        }
+            self.diagnostic().struct_span_warn(sp, &format!("obsolete syntax: {}", kind_str))
+        };
 
         if !self.obsolete_set.contains(&kind) &&
-            (error || self.sess.span_diagnostic.handler().can_emit_warnings) {
-            self.sess
-                .span_diagnostic
-                .handler()
-                .note(&format!("{}", desc));
+            (error || self.sess.span_diagnostic.can_emit_warnings) {
+            err.note(&format!("{}", desc));
             self.obsolete_set.insert(kind);
         }
-    }
-
-    fn is_obsolete_ident(&mut self, ident: &str) -> bool {
-        match self.token {
-            token::Ident(sid, _) => {
-                token::get_ident(sid) == ident
-            }
-            _ => false
-        }
-    }
-
-    fn eat_obsolete_ident(&mut self, ident: &str) -> bool {
-        if self.is_obsolete_ident(ident) {
-            panictry!(self.bump());
-            true
-        } else {
-            false
-        }
+        err.emit();
     }
 }

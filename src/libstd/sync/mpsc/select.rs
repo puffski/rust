@@ -27,7 +27,8 @@
 //! # Examples
 //!
 //! ```rust
-//! # #![feature(mpsc_select)]
+//! #![feature(mpsc_select)]
+//!
 //! use std::sync::mpsc::channel;
 //!
 //! let (tx1, rx1) = channel();
@@ -53,14 +54,14 @@
                       module will likely be replaced, and it is currently \
                       unknown how much API breakage that will cause. The ability \
                       to select over a number of channels will remain forever, \
-                      but no guarantees beyond this are being made")]
+                      but no guarantees beyond this are being made",
+            issue = "27800")]
 
 
-use core::prelude::*;
+use fmt;
 
 use core::cell::{Cell, UnsafeCell};
 use core::marker;
-use core::mem;
 use core::ptr;
 use core::usize;
 
@@ -124,7 +125,8 @@ impl Select {
     /// # Examples
     ///
     /// ```
-    /// # #![feature(mpsc_select)]
+    /// #![feature(mpsc_select)]
+    ///
     /// use std::sync::mpsc::Select;
     ///
     /// let select = Select::new();
@@ -278,7 +280,7 @@ impl<'rx, T: Send> Handle<'rx, T> {
     pub unsafe fn add(&mut self) {
         if self.added { return }
         let selector = &mut *self.selector;
-        let me: *mut Handle<'static, ()> = mem::transmute(&*self);
+        let me = self as *mut Handle<'rx, T> as *mut Handle<'static, ()>;
 
         if selector.head.is_null() {
             selector.head = me;
@@ -299,7 +301,7 @@ impl<'rx, T: Send> Handle<'rx, T> {
         if !self.added { return }
 
         let selector = &mut *self.selector;
-        let me: *mut Handle<'static, ()> = mem::transmute(&*self);
+        let me = self as *mut Handle<'rx, T> as *mut Handle<'static, ()>;
 
         if self.prev.is_null() {
             assert_eq!(selector.head, me);
@@ -347,6 +349,20 @@ impl Iterator for Packets {
             unsafe { self.cur = (*self.cur).next; }
             ret
         }
+    }
+}
+
+#[stable(feature = "mpsc_debug", since = "1.7.0")]
+impl fmt::Debug for Select {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Select {{ .. }}")
+    }
+}
+
+#[stable(feature = "mpsc_debug", since = "1.7.0")]
+impl<'rx, T:Send+'rx> fmt::Debug for Handle<'rx, T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Handle {{ .. }}")
     }
 }
 
@@ -761,5 +777,19 @@ mod tests {
                 assert_eq!(rx1.recv().unwrap(), 1);
             }
         }
+    }
+
+    #[test]
+    fn fmt_debug_select() {
+        let sel = Select::new();
+        assert_eq!(format!("{:?}", sel), "Select { .. }");
+    }
+
+    #[test]
+    fn fmt_debug_handle() {
+        let (_, rx) = channel::<i32>();
+        let sel = Select::new();
+        let handle = sel.handle(&rx);
+        assert_eq!(format!("{:?}", handle), "Handle { .. }");
     }
 }

@@ -25,6 +25,7 @@ pub enum Mode {
     DebugInfoLldb,
     Codegen,
     Rustdoc,
+    CodegenUnits
 }
 
 impl FromStr for Mode {
@@ -41,6 +42,7 @@ impl FromStr for Mode {
           "debuginfo-gdb" => Ok(DebugInfoGdb),
           "codegen" => Ok(Codegen),
           "rustdoc" => Ok(Rustdoc),
+          "codegen-units" => Ok(CodegenUnits),
           _ => Err(()),
         }
     }
@@ -59,6 +61,7 @@ impl fmt::Display for Mode {
             DebugInfoLldb => "debuginfo-lldb",
             Codegen => "codegen",
             Rustdoc => "rustdoc",
+            CodegenUnits => "codegen-units",
         }, f)
     }
 }
@@ -66,10 +69,10 @@ impl fmt::Display for Mode {
 #[derive(Clone)]
 pub struct Config {
     // The library paths required for running the compiler
-    pub compile_lib_path: String,
+    pub compile_lib_path: PathBuf,
 
     // The library paths required for running compiled programs
-    pub run_lib_path: String,
+    pub run_lib_path: PathBuf,
 
     // The rustc executable
     pub rustc_path: PathBuf,
@@ -152,5 +155,8 @@ pub struct Config {
     pub lldb_python_dir: Option<String>,
 
     // Explain what's going on
-    pub verbose: bool
+    pub verbose: bool,
+
+    // Print one character per test instead of one line
+    pub quiet: bool,
 }

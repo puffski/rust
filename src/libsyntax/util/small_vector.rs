@@ -16,7 +16,7 @@ use std::mem;
 use std::slice;
 use std::vec;
 
-use fold::MoveMap;
+use util::move_map::MoveMap;
 
 /// A vector type optimized for cases where the size is almost always 0 or 1
 pub struct SmallVector<T> {
@@ -58,14 +58,13 @@ impl<T> SmallVector<T> {
         SmallVector { repr: Many(vs) }
     }
 
-    pub fn as_slice<'a>(&'a self) -> &'a [T] {
+    pub fn as_slice(&self) -> &[T] {
         match self.repr {
             Zero => {
                 let result: &[T] = &[];
                 result
             }
             One(ref v) => {
-                // FIXME: Could be replaced with `slice::ref_slice(v)` when it is stable.
                 unsafe { slice::from_raw_parts(v, 1) }
             }
             Many(ref vs) => vs
@@ -106,7 +105,7 @@ impl<T> SmallVector<T> {
         }
     }
 
-    pub fn get<'a>(&'a self, idx: usize) -> &'a T {
+    pub fn get(&self, idx: usize) -> &T {
         match self.repr {
             One(ref v) if idx == 0 => v,
             Many(ref vs) => &vs[idx],
@@ -128,22 +127,6 @@ impl<T> SmallVector<T> {
         }
     }
 
-    /// Deprecated: use `into_iter`.
-    #[unstable(feature = "rustc_private")]
-    #[deprecated(since = "1.0.0", reason = "use into_iter")]
-    pub fn move_iter(self) -> IntoIter<T> {
-        self.into_iter()
-    }
-
-    pub fn into_iter(self) -> IntoIter<T> {
-        let repr = match self.repr {
-            Zero => ZeroIterator,
-            One(v) => OneIterator(v),
-            Many(vs) => ManyIterator(vs.into_iter())
-        };
-        IntoIter { repr: repr }
-    }
-
     pub fn len(&self) -> usize {
         match self.repr {
             Zero => 0,
@@ -153,6 +136,19 @@ impl<T> SmallVector<T> {
     }
 
     pub fn is_empty(&self) -> bool { self.len() == 0 }
+}
+
+impl<T> IntoIterator for SmallVector<T> {
+    type Item = T;
+    type IntoIter = IntoIter<T>;
+    fn into_iter(self) -> Self::IntoIter {
+        let repr = match self.repr {
+            Zero => ZeroIterator,
+            One(v) => OneIterator(v),
+            Many(vs) => ManyIterator(vs.into_iter())
+        };
+        IntoIter { repr: repr }
+    }
 }
 
 pub struct IntoIter<T> {
@@ -193,13 +189,15 @@ impl<T> Iterator for IntoIter<T> {
 }
 
 impl<T> MoveMap<T> for SmallVector<T> {
-    fn move_map<F>(self, mut f: F) -> SmallVector<T> where F: FnMut(T) -> T {
-        let repr = match self.repr {
-            Zero => Zero,
-            One(v) => One(f(v)),
-            Many(vs) => Many(vs.move_map(f))
-        };
-        SmallVector { repr: repr }
+    fn move_flat_map<F, I>(self, mut f: F) -> Self
+        where F: FnMut(T) -> I,
+              I: IntoIterator<Item=T>
+    {
+        match self.repr {
+            Zero => Self::zero(),
+            One(v) => f(v).into_iter().collect(),
+            Many(vs) => SmallVector { repr: Many(vs.move_flat_map(f)) },
+        }
     }
 }
 

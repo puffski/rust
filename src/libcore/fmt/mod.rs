@@ -8,13 +8,13 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! Utilities for formatting and printing strings
+//! Utilities for formatting and printing strings.
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
-use prelude::*;
+use prelude::v1::*;
 
-use cell::{Cell, RefCell, Ref, RefMut, BorrowState};
+use cell::{UnsafeCell, Cell, RefCell, Ref, RefMut, BorrowState};
 use marker::PhantomData;
 use mem;
 use num::flt2dec;
@@ -22,18 +22,29 @@ use ops::Deref;
 use result;
 use slice;
 use str;
-use self::rt::v1::Alignment;
 
-pub use self::num::radix;
-pub use self::num::Radix;
-pub use self::num::RadixFmt;
+#[unstable(feature = "fmt_flags_align", issue = "27726")]
+/// Possible alignments returned by `Formatter::align`
+#[derive(Debug)]
+pub enum Alignment {
+    /// Indication that contents should be left-aligned.
+    Left,
+    /// Indication that contents should be right-aligned.
+    Right,
+    /// Indication that contents should be center-aligned.
+    Center,
+    /// No alignment was requested.
+    Unknown,
+}
 
+#[stable(feature = "debug_builders", since = "1.2.0")]
 pub use self::builders::{DebugStruct, DebugTuple, DebugSet, DebugList, DebugMap};
 
 mod num;
 mod builders;
 
-#[unstable(feature = "fmt_internals", reason = "internal to format_args!")]
+#[unstable(feature = "fmt_internals", reason = "internal to format_args!",
+           issue = "0")]
 #[doc(hidden)]
 pub mod rt {
     pub mod v1;
@@ -88,12 +99,12 @@ pub trait Write {
     /// This function will return an instance of `Error` on error.
     #[stable(feature = "fmt_write_char", since = "1.1.0")]
     fn write_char(&mut self, c: char) -> Result {
-        let mut utf_8 = [0u8; 4];
-        let bytes_written = c.encode_utf8(&mut utf_8).unwrap_or(0);
-        self.write_str(unsafe { mem::transmute(&utf_8[..bytes_written]) })
+        self.write_str(unsafe {
+            str::from_utf8_unchecked(c.encode_utf8().as_slice())
+        })
     }
 
-    /// Glue for usage of the `write!` macro with implementers of this trait.
+    /// Glue for usage of the `write!` macro with implementors of this trait.
     ///
     /// This method should generally not be invoked manually, but rather through
     /// the `write!` macro itself.
@@ -111,6 +122,10 @@ pub trait Write {
                 self.0.write_str(s)
             }
 
+            fn write_char(&mut self, c: char) -> Result {
+                self.0.write_char(c)
+            }
+
             fn write_fmt(&mut self, args: Arguments) -> Result {
                 self.0.write_fmt(args)
             }
@@ -120,9 +135,25 @@ pub trait Write {
     }
 }
 
+#[stable(feature = "fmt_write_blanket_impl", since = "1.4.0")]
+impl<'a, W: Write + ?Sized> Write for &'a mut W {
+    fn write_str(&mut self, s: &str) -> Result {
+        (**self).write_str(s)
+    }
+
+    fn write_char(&mut self, c: char) -> Result {
+        (**self).write_char(c)
+    }
+
+    fn write_fmt(&mut self, args: Arguments) -> Result {
+        (**self).write_fmt(args)
+    }
+}
+
 /// A struct to represent both where to emit formatting strings to and how they
 /// should be formatted. A mutable version of this is passed to all formatting
 /// traits.
+#[allow(missing_debug_implementations)]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Formatter<'a> {
     flags: u32,
@@ -146,13 +177,17 @@ enum Void {}
 /// compile time it is ensured that the function and the value have the correct
 /// types, and then this struct is used to canonicalize arguments to one type.
 #[derive(Copy)]
-#[unstable(feature = "fmt_internals", reason = "internal to format_args!")]
+#[allow(missing_debug_implementations)]
+#[unstable(feature = "fmt_internals", reason = "internal to format_args!",
+           issue = "0")]
 #[doc(hidden)]
 pub struct ArgumentV1<'a> {
     value: &'a Void,
     formatter: fn(&Void, &mut Formatter) -> Result,
 }
 
+#[unstable(feature = "fmt_internals", reason = "internal to format_args!",
+           issue = "0")]
 impl<'a> Clone for ArgumentV1<'a> {
     fn clone(&self) -> ArgumentV1<'a> {
         *self
@@ -166,7 +201,8 @@ impl<'a> ArgumentV1<'a> {
     }
 
     #[doc(hidden)]
-    #[unstable(feature = "fmt_internals", reason = "internal to format_args!")]
+    #[unstable(feature = "fmt_internals", reason = "internal to format_args!",
+               issue = "0")]
     pub fn new<'b, T>(x: &'b T,
                       f: fn(&T, &mut Formatter) -> Result) -> ArgumentV1<'b> {
         unsafe {
@@ -178,7 +214,8 @@ impl<'a> ArgumentV1<'a> {
     }
 
     #[doc(hidden)]
-    #[unstable(feature = "fmt_internals", reason = "internal to format_args!")]
+    #[unstable(feature = "fmt_internals", reason = "internal to format_args!",
+               issue = "0")]
     pub fn from_usize(x: &usize) -> ArgumentV1 {
         ArgumentV1::new(x, ArgumentV1::show_usize)
     }
@@ -201,7 +238,8 @@ impl<'a> Arguments<'a> {
     /// When using the format_args!() macro, this function is used to generate the
     /// Arguments structure.
     #[doc(hidden)] #[inline]
-    #[unstable(feature = "fmt_internals", reason = "internal to format_args!")]
+    #[unstable(feature = "fmt_internals", reason = "internal to format_args!",
+               issue = "0")]
     pub fn new_v1(pieces: &'a [&'a str],
                   args: &'a [ArgumentV1<'a>]) -> Arguments<'a> {
         Arguments {
@@ -218,7 +256,8 @@ impl<'a> Arguments<'a> {
     /// created with `argumentusize`. However, failing to do so doesn't cause
     /// unsafety, but will ignore invalid .
     #[doc(hidden)] #[inline]
-    #[unstable(feature = "fmt_internals", reason = "internal to format_args!")]
+    #[unstable(feature = "fmt_internals", reason = "internal to format_args!",
+               issue = "0")]
     pub fn new_v1_formatted(pieces: &'a [&'a str],
                             args: &'a [ArgumentV1<'a>],
                             fmt: &'a [rt::v1::Argument]) -> Arguments<'a> {
@@ -277,7 +316,9 @@ impl<'a> Display for Arguments<'a> {
 ///
 /// For more information on formatters, see [the module-level documentation][module].
 ///
-/// [module]: ../index.html
+/// [module]: ../../std/fmt/index.html
+///
+/// This trait can be used with `#[derive]`.
 ///
 /// # Examples
 ///
@@ -307,7 +348,7 @@ impl<'a> Display for Arguments<'a> {
 ///
 /// impl fmt::Debug for Point {
 ///     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-///         write!(f, "({}, {})", self.x, self.y)
+///         write!(f, "Point {{ x: {}, y: {} }}", self.x, self.y)
 ///     }
 /// }
 ///
@@ -328,7 +369,7 @@ impl<'a> Display for Arguments<'a> {
 /// `Debug` implementations using either `derive` or the debug builder API
 /// on `Formatter` support pretty printing using the alternate flag: `{:#?}`.
 ///
-/// [debug_struct]: ../std/fmt/struct.Formatter.html#method.debug_struct
+/// [debug_struct]: ../../std/fmt/struct.Formatter.html#method.debug_struct
 ///
 /// Pretty printing with `#?`:
 ///
@@ -372,7 +413,7 @@ pub trait Debug {
 ///
 /// For more information on formatters, see [the module-level documentation][module].
 ///
-/// [module]: ../index.html
+/// [module]: ../../std/fmt/index.html
 ///
 /// # Examples
 ///
@@ -414,7 +455,7 @@ pub trait Display {
 ///
 /// For more information on formatters, see [the module-level documentation][module].
 ///
-/// [module]: ../index.html
+/// [module]: ../../std/fmt/index.html
 ///
 /// # Examples
 ///
@@ -461,7 +502,7 @@ pub trait Octal {
 ///
 /// For more information on formatters, see [the module-level documentation][module].
 ///
-/// [module]: ../index.html
+/// [module]: ../../std/fmt/index.html
 ///
 /// # Examples
 ///
@@ -502,14 +543,14 @@ pub trait Binary {
 
 /// Format trait for the `x` character.
 ///
-/// The `LowerHex` trait should format its output as a number in hexidecimal, with `a` through `f`
+/// The `LowerHex` trait should format its output as a number in hexadecimal, with `a` through `f`
 /// in lower case.
 ///
 /// The alternate flag, `#`, adds a `0x` in front of the output.
 ///
 /// For more information on formatters, see [the module-level documentation][module].
 ///
-/// [module]: ../index.html
+/// [module]: ../../std/fmt/index.html
 ///
 /// # Examples
 ///
@@ -550,14 +591,14 @@ pub trait LowerHex {
 
 /// Format trait for the `X` character.
 ///
-/// The `UpperHex` trait should format its output as a number in hexidecimal, with `A` through `F`
+/// The `UpperHex` trait should format its output as a number in hexadecimal, with `A` through `F`
 /// in upper case.
 ///
 /// The alternate flag, `#`, adds a `0x` in front of the output.
 ///
 /// For more information on formatters, see [the module-level documentation][module].
 ///
-/// [module]: ../index.html
+/// [module]: ../../std/fmt/index.html
 ///
 /// # Examples
 ///
@@ -599,11 +640,11 @@ pub trait UpperHex {
 /// Format trait for the `p` character.
 ///
 /// The `Pointer` trait should format its output as a memory location. This is commonly presented
-/// as hexidecimal.
+/// as hexadecimal.
 ///
 /// For more information on formatters, see [the module-level documentation][module].
 ///
-/// [module]: ../index.html
+/// [module]: ../../std/fmt/index.html
 ///
 /// # Examples
 ///
@@ -647,7 +688,7 @@ pub trait Pointer {
 ///
 /// For more information on formatters, see [the module-level documentation][module].
 ///
-/// [module]: ../index.html
+/// [module]: ../../std/fmt/index.html
 ///
 /// # Examples
 ///
@@ -690,7 +731,7 @@ pub trait LowerExp {
 ///
 /// For more information on formatters, see [the module-level documentation][module].
 ///
-/// [module]: ../index.html
+/// [module]: ../../std/fmt/index.html
 ///
 /// # Examples
 ///
@@ -742,7 +783,7 @@ pub fn write(output: &mut Write, args: Arguments) -> Result {
         width: None,
         precision: None,
         buf: output,
-        align: Alignment::Unknown,
+        align: rt::v1::Alignment::Unknown,
         fill: ' ',
         args: args.args,
         curarg: args.args.iter(),
@@ -754,16 +795,16 @@ pub fn write(output: &mut Write, args: Arguments) -> Result {
         None => {
             // We can use default formatting parameters for all arguments.
             for (arg, piece) in args.args.iter().zip(pieces.by_ref()) {
-                try!(formatter.buf.write_str(*piece));
-                try!((arg.formatter)(arg.value, &mut formatter));
+                formatter.buf.write_str(*piece)?;
+                (arg.formatter)(arg.value, &mut formatter)?;
             }
         }
         Some(fmt) => {
             // Every spec has a corresponding argument that is preceded by
             // a string piece.
             for (arg, piece) in fmt.iter().zip(pieces.by_ref()) {
-                try!(formatter.buf.write_str(*piece));
-                try!(formatter.run(arg));
+                formatter.buf.write_str(*piece)?;
+                formatter.run(arg)?;
             }
         }
     }
@@ -771,7 +812,7 @@ pub fn write(output: &mut Write, args: Arguments) -> Result {
     // There can be only one trailing string piece left.
     match pieces.next() {
         Some(piece) => {
-            try!(formatter.buf.write_str(*piece));
+            formatter.buf.write_str(*piece)?;
         }
         None => {}
     }
@@ -824,7 +865,7 @@ impl<'a> Formatter<'a> {
     ///
     /// # Arguments
     ///
-    /// * is_positive - whether the original integer was positive or not.
+    /// * is_nonnegative - whether the original integer was either positive or zero.
     /// * prefix - if the '#' character (Alternate) is provided, this
     ///   is the prefix to put in front of the number.
     /// * buf - the byte array that the number has been formatted into
@@ -833,7 +874,7 @@ impl<'a> Formatter<'a> {
     /// the minimum width. It will not take precision into account.
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn pad_integral(&mut self,
-                        is_positive: bool,
+                        is_nonnegative: bool,
                         prefix: &str,
                         buf: &str)
                         -> Result {
@@ -842,24 +883,23 @@ impl<'a> Formatter<'a> {
         let mut width = buf.len();
 
         let mut sign = None;
-        if !is_positive {
+        if !is_nonnegative {
             sign = Some('-'); width += 1;
-        } else if self.flags & (1 << (FlagV1::SignPlus as u32)) != 0 {
+        } else if self.sign_plus() {
             sign = Some('+'); width += 1;
         }
 
         let mut prefixed = false;
-        if self.flags & (1 << (FlagV1::Alternate as u32)) != 0 {
-            prefixed = true; width += prefix.char_len();
+        if self.alternate() {
+            prefixed = true; width += prefix.chars().count();
         }
 
         // Writes the sign if it exists, and then the prefix if it was requested
         let write_prefix = |f: &mut Formatter| {
             if let Some(c) = sign {
-                let mut b = [0; 4];
-                let n = c.encode_utf8(&mut b).unwrap_or(0);
-                let b = unsafe { str::from_utf8_unchecked(&b[..n]) };
-                try!(f.buf.write_str(b));
+                f.buf.write_str(unsafe {
+                    str::from_utf8_unchecked(c.encode_utf8().as_slice())
+                })?;
             }
             if prefixed { f.buf.write_str(prefix) }
             else { Ok(()) }
@@ -870,26 +910,26 @@ impl<'a> Formatter<'a> {
             // If there's no minimum length requirements then we can just
             // write the bytes.
             None => {
-                try!(write_prefix(self)); self.buf.write_str(buf)
+                write_prefix(self)?; self.buf.write_str(buf)
             }
             // Check if we're over the minimum width, if so then we can also
             // just write the bytes.
             Some(min) if width >= min => {
-                try!(write_prefix(self)); self.buf.write_str(buf)
+                write_prefix(self)?; self.buf.write_str(buf)
             }
             // The sign and prefix goes before the padding if the fill character
             // is zero
-            Some(min) if self.flags & (1 << (FlagV1::SignAwareZeroPad as u32)) != 0 => {
+            Some(min) if self.sign_aware_zero_pad() => {
                 self.fill = '0';
-                try!(write_prefix(self));
-                self.with_padding(min - width, Alignment::Right, |f| {
+                write_prefix(self)?;
+                self.with_padding(min - width, rt::v1::Alignment::Right, |f| {
                     f.buf.write_str(buf)
                 })
             }
             // Otherwise, the sign and prefix goes after the padding
             Some(min) => {
-                self.with_padding(min - width, Alignment::Right, |f| {
-                    try!(write_prefix(f)); f.buf.write_str(buf)
+                self.with_padding(min - width, rt::v1::Alignment::Right, |f| {
+                    write_prefix(f)?; f.buf.write_str(buf)
                 })
             }
         }
@@ -914,18 +954,13 @@ impl<'a> Formatter<'a> {
         }
         // The `precision` field can be interpreted as a `max-width` for the
         // string being formatted
-        match self.precision {
-            Some(max) => {
-                // If there's a maximum width and our string is longer than
-                // that, then we must always have truncation. This is the only
-                // case where the maximum length will matter.
-                let char_len = s.char_len();
-                if char_len >= max {
-                    let nchars = ::cmp::min(max, char_len);
-                    return self.buf.write_str(s.slice_chars(0, nchars));
-                }
+        if let Some(max) = self.precision {
+            // If there's a maximum width and our string is longer than
+            // that, then we must always have truncation. This is the only
+            // case where the maximum length will matter.
+            if let Some((i, _)) = s.char_indices().skip(max).next() {
+                return self.buf.write_str(&s[..i])
             }
-            None => {}
         }
         // The `width` field is more of a `min-width` parameter at this point.
         match self.width {
@@ -934,13 +969,14 @@ impl<'a> Formatter<'a> {
             None => self.buf.write_str(s),
             // If we're under the maximum width, check if we're over the minimum
             // width, if so it's as easy as just emitting the string.
-            Some(width) if s.char_len() >= width => {
+            Some(width) if s.chars().count() >= width => {
                 self.buf.write_str(s)
             }
             // If we're under both the maximum and the minimum width, then fill
             // up the minimum width with the specified string + some alignment.
             Some(width) => {
-                self.with_padding(width - s.char_len(), Alignment::Left, |me| {
+                let align = rt::v1::Alignment::Left;
+                self.with_padding(width - s.chars().count(), align, |me| {
                     me.buf.write_str(s)
                 })
             }
@@ -949,34 +985,36 @@ impl<'a> Formatter<'a> {
 
     /// Runs a callback, emitting the correct padding either before or
     /// afterwards depending on whether right or left alignment is requested.
-    fn with_padding<F>(&mut self, padding: usize, default: Alignment,
+    fn with_padding<F>(&mut self, padding: usize, default: rt::v1::Alignment,
                        f: F) -> Result
         where F: FnOnce(&mut Formatter) -> Result,
     {
         use char::CharExt;
         let align = match self.align {
-            Alignment::Unknown => default,
+            rt::v1::Alignment::Unknown => default,
             _ => self.align
         };
 
         let (pre_pad, post_pad) = match align {
-            Alignment::Left => (0, padding),
-            Alignment::Right | Alignment::Unknown => (padding, 0),
-            Alignment::Center => (padding / 2, (padding + 1) / 2),
+            rt::v1::Alignment::Left => (0, padding),
+            rt::v1::Alignment::Right |
+            rt::v1::Alignment::Unknown => (padding, 0),
+            rt::v1::Alignment::Center => (padding / 2, (padding + 1) / 2),
         };
 
-        let mut fill = [0; 4];
-        let len = self.fill.encode_utf8(&mut fill).unwrap_or(0);
-        let fill = unsafe { str::from_utf8_unchecked(&fill[..len]) };
+        let fill = self.fill.encode_utf8();
+        let fill = unsafe {
+            str::from_utf8_unchecked(fill.as_slice())
+        };
 
         for _ in 0..pre_pad {
-            try!(self.buf.write_str(fill));
+            self.buf.write_str(fill)?;
         }
 
-        try!(f(self));
+        f(self)?;
 
         for _ in 0..post_pad {
-            try!(self.buf.write_str(fill));
+            self.buf.write_str(fill)?;
         }
 
         Ok(())
@@ -992,15 +1030,15 @@ impl<'a> Formatter<'a> {
             let mut formatted = formatted.clone();
             let mut align = self.align;
             let old_fill = self.fill;
-            if self.flags & (1 << (FlagV1::SignAwareZeroPad as u32)) != 0 {
+            if self.sign_aware_zero_pad() {
                 // a sign always goes first
                 let sign = unsafe { str::from_utf8_unchecked(formatted.sign) };
-                try!(self.buf.write_str(sign));
+                self.buf.write_str(sign)?;
 
                 // remove the sign from the formatted parts
                 formatted.sign = b"";
                 width = if width < sign.len() { 0 } else { width - sign.len() };
-                align = Alignment::Right;
+                align = rt::v1::Alignment::Right;
                 self.fill = '0';
             }
 
@@ -1027,7 +1065,7 @@ impl<'a> Formatter<'a> {
         }
 
         if !formatted.sign.is_empty() {
-            try!(write_bytes(self.buf, formatted.sign));
+            write_bytes(self.buf, formatted.sign)?;
         }
         for part in formatted.parts {
             match *part {
@@ -1035,11 +1073,11 @@ impl<'a> Formatter<'a> {
                     const ZEROES: &'static str = // 64 zeroes
                         "0000000000000000000000000000000000000000000000000000000000000000";
                     while nzeroes > ZEROES.len() {
-                        try!(self.buf.write_str(ZEROES));
+                        self.buf.write_str(ZEROES)?;
                         nzeroes -= ZEROES.len();
                     }
                     if nzeroes > 0 {
-                        try!(self.buf.write_str(&ZEROES[..nzeroes]));
+                        self.buf.write_str(&ZEROES[..nzeroes])?;
                     }
                 }
                 flt2dec::Part::Num(mut v) => {
@@ -1049,10 +1087,10 @@ impl<'a> Formatter<'a> {
                         *c = b'0' + (v % 10) as u8;
                         v /= 10;
                     }
-                    try!(write_bytes(self.buf, &s[..len]));
+                    write_bytes(self.buf, &s[..len])?;
                 }
                 flt2dec::Part::Copy(buf) => {
-                    try!(write_bytes(self.buf, buf));
+                    write_bytes(self.buf, buf)?;
                 }
             }
         }
@@ -1077,20 +1115,46 @@ impl<'a> Formatter<'a> {
     pub fn flags(&self) -> u32 { self.flags }
 
     /// Character used as 'fill' whenever there is alignment
-    #[unstable(feature = "fmt_flags", reason = "method was just created")]
+    #[stable(feature = "fmt_flags", since = "1.5.0")]
     pub fn fill(&self) -> char { self.fill }
 
     /// Flag indicating what form of alignment was requested
-    #[unstable(feature = "fmt_flags", reason = "method was just created")]
-    pub fn align(&self) -> Alignment { self.align }
+    #[unstable(feature = "fmt_flags_align", reason = "method was just created",
+               issue = "27726")]
+    pub fn align(&self) -> Alignment {
+        match self.align {
+            rt::v1::Alignment::Left => Alignment::Left,
+            rt::v1::Alignment::Right => Alignment::Right,
+            rt::v1::Alignment::Center => Alignment::Center,
+            rt::v1::Alignment::Unknown => Alignment::Unknown,
+        }
+    }
 
     /// Optionally specified integer width that the output should be
-    #[unstable(feature = "fmt_flags", reason = "method was just created")]
+    #[stable(feature = "fmt_flags", since = "1.5.0")]
     pub fn width(&self) -> Option<usize> { self.width }
 
     /// Optionally specified precision for numeric types
-    #[unstable(feature = "fmt_flags", reason = "method was just created")]
+    #[stable(feature = "fmt_flags", since = "1.5.0")]
     pub fn precision(&self) -> Option<usize> { self.precision }
+
+    /// Determines if the `+` flag was specified.
+    #[stable(feature = "fmt_flags", since = "1.5.0")]
+    pub fn sign_plus(&self) -> bool { self.flags & (1 << FlagV1::SignPlus as u32) != 0 }
+
+    /// Determines if the `-` flag was specified.
+    #[stable(feature = "fmt_flags", since = "1.5.0")]
+    pub fn sign_minus(&self) -> bool { self.flags & (1 << FlagV1::SignMinus as u32) != 0 }
+
+    /// Determines if the `#` flag was specified.
+    #[stable(feature = "fmt_flags", since = "1.5.0")]
+    pub fn alternate(&self) -> bool { self.flags & (1 << FlagV1::Alternate as u32) != 0 }
+
+    /// Determines if the `0` flag was specified.
+    #[stable(feature = "fmt_flags", since = "1.5.0")]
+    pub fn sign_aware_zero_pad(&self) -> bool {
+        self.flags & (1 << FlagV1::SignAwareZeroPad as u32) != 0
+    }
 
     /// Creates a `DebugStruct` builder designed to assist with creation of
     /// `fmt::Debug` implementations for structs.
@@ -1285,11 +1349,21 @@ impl Display for bool {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl Debug for str {
     fn fmt(&self, f: &mut Formatter) -> Result {
-        try!(write!(f, "\""));
-        for c in self.chars().flat_map(|c| c.escape_default()) {
-            try!(write!(f, "{}", c));
+        f.write_char('"')?;
+        let mut from = 0;
+        for (i, c) in self.char_indices() {
+            let esc = c.escape_default();
+            // If char needs escaping, flush backlog so far and write, else skip
+            if esc.size_hint() != (1, Some(1)) {
+                f.write_str(&self[from..i])?;
+                for c in esc {
+                    f.write_char(c)?;
+                }
+                from = i + c.len_utf8();
+            }
         }
-        write!(f, "\"")
+        f.write_str(&self[from..])?;
+        f.write_char('"')
     }
 }
 
@@ -1303,12 +1377,11 @@ impl Display for str {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl Debug for char {
     fn fmt(&self, f: &mut Formatter) -> Result {
-        use char::CharExt;
-        try!(write!(f, "'"));
+        f.write_char('\'')?;
         for c in self.escape_default() {
-            try!(write!(f, "{}", c));
+            f.write_char(c)?
         }
-        write!(f, "'")
+        f.write_char('\'')
     }
 }
 
@@ -1318,16 +1391,15 @@ impl Display for char {
         if f.width.is_none() && f.precision.is_none() {
             f.write_char(*self)
         } else {
-            let mut utf8 = [0; 4];
-            let amt = self.encode_utf8(&mut utf8).unwrap_or(0);
-            let s: &str = unsafe { mem::transmute(&utf8[..amt]) };
-            f.pad(s)
+            f.pad(unsafe {
+                str::from_utf8_unchecked(self.encode_utf8().as_slice())
+            })
         }
     }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<T> Pointer for *const T {
+impl<T: ?Sized> Pointer for *const T {
     fn fmt(&self, f: &mut Formatter) -> Result {
         let old_width = f.width;
         let old_flags = f.flags;
@@ -1336,21 +1408,16 @@ impl<T> Pointer for *const T {
         // it denotes whether to prefix with 0x. We use it to work out whether
         // or not to zero extend, and then unconditionally set it to get the
         // prefix.
-        if f.flags & 1 << (FlagV1::Alternate as u32) > 0 {
+        if f.alternate() {
             f.flags |= 1 << (FlagV1::SignAwareZeroPad as u32);
 
             if let None = f.width {
-                // The formats need two extra bytes, for the 0x
-                if cfg!(target_pointer_width = "32") {
-                    f.width = Some(10);
-                } else {
-                    f.width = Some(18);
-                }
+                f.width = Some(((mem::size_of::<usize>() * 8) / 4) + 2);
             }
         }
         f.flags |= 1 << (FlagV1::Alternate as u32);
 
-        let ret = LowerHex::fmt(&(*self as usize), f);
+        let ret = LowerHex::fmt(&(*self as *const () as usize), f);
 
         f.width = old_width;
         f.flags = old_flags;
@@ -1360,28 +1427,22 @@ impl<T> Pointer for *const T {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<T> Pointer for *mut T {
+impl<T: ?Sized> Pointer for *mut T {
     fn fmt(&self, f: &mut Formatter) -> Result {
-        // FIXME(#23542) Replace with type ascription.
-        #![allow(trivial_casts)]
         Pointer::fmt(&(*self as *const T), f)
     }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, T> Pointer for &'a T {
+impl<'a, T: ?Sized> Pointer for &'a T {
     fn fmt(&self, f: &mut Formatter) -> Result {
-        // FIXME(#23542) Replace with type ascription.
-        #![allow(trivial_casts)]
         Pointer::fmt(&(*self as *const T), f)
     }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<'a, T> Pointer for &'a mut T {
+impl<'a, T: ?Sized> Pointer for &'a mut T {
     fn fmt(&self, f: &mut Formatter) -> Result {
-        // FIXME(#23542) Replace with type ascription.
-        #![allow(trivial_casts)]
         Pointer::fmt(&(&**self as *const T), f)
     }
 }
@@ -1390,7 +1451,7 @@ impl<'a, T> Pointer for &'a mut T {
 fn float_to_decimal_common<T>(fmt: &mut Formatter, num: &T, negative_zero: bool) -> Result
     where T: flt2dec::DecodableFloat
 {
-    let force_sign = fmt.flags & (1 << (FlagV1::SignPlus as u32)) != 0;
+    let force_sign = fmt.sign_plus();
     let sign = match (force_sign, negative_zero) {
         (false, false) => flt2dec::Sign::Minus,
         (false, true)  => flt2dec::Sign::MinusRaw,
@@ -1414,7 +1475,7 @@ fn float_to_decimal_common<T>(fmt: &mut Formatter, num: &T, negative_zero: bool)
 fn float_to_exponential_common<T>(fmt: &mut Formatter, num: &T, upper: bool) -> Result
     where T: flt2dec::DecodableFloat
 {
-    let force_sign = fmt.flags & (1 << (FlagV1::SignPlus as u32)) != 0;
+    let force_sign = fmt.sign_plus();
     let sign = match force_sign {
         false => flt2dec::Sign::Minus,
         true  => flt2dec::Sign::MinusPlus,
@@ -1486,19 +1547,13 @@ macro_rules! tuple {
     ( $($name:ident,)+ ) => (
         #[stable(feature = "rust1", since = "1.0.0")]
         impl<$($name:Debug),*> Debug for ($($name,)*) {
-            #[allow(non_snake_case, unused_assignments)]
+            #[allow(non_snake_case, unused_assignments, deprecated)]
             fn fmt(&self, f: &mut Formatter) -> Result {
                 let mut builder = f.debug_tuple("");
                 let ($(ref $name,)*) = *self;
-                let mut n = 0;
                 $(
                     builder.field($name);
-                    n += 1;
                 )*
-
-                if n == 1 {
-                    try!(write!(builder.formatter(), ","));
-                }
 
                 builder.finish()
             }
@@ -1522,7 +1577,8 @@ impl Debug for () {
         f.pad("()")
     }
 }
-impl<T> Debug for PhantomData<T> {
+#[stable(feature = "rust1", since = "1.0.0")]
+impl<T: ?Sized> Debug for PhantomData<T> {
     fn fmt(&self, f: &mut Formatter) -> Result {
         f.pad("PhantomData")
     }
@@ -1531,7 +1587,9 @@ impl<T> Debug for PhantomData<T> {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T: Copy + Debug> Debug for Cell<T> {
     fn fmt(&self, f: &mut Formatter) -> Result {
-        write!(f, "Cell {{ value: {:?} }}", self.get())
+        f.debug_struct("Cell")
+            .field("value", &self.get())
+            .finish()
     }
 }
 
@@ -1540,9 +1598,15 @@ impl<T: ?Sized + Debug> Debug for RefCell<T> {
     fn fmt(&self, f: &mut Formatter) -> Result {
         match self.borrow_state() {
             BorrowState::Unused | BorrowState::Reading => {
-                write!(f, "RefCell {{ value: {:?} }}", self.borrow())
+                f.debug_struct("RefCell")
+                    .field("value", &self.borrow())
+                    .finish()
             }
-            BorrowState::Writing => write!(f, "RefCell {{ <borrowed> }}"),
+            BorrowState::Writing => {
+                f.debug_struct("RefCell")
+                    .field("value", &"<borrowed>")
+                    .finish()
+            }
         }
     }
 }
@@ -1558,6 +1622,13 @@ impl<'b, T: ?Sized + Debug> Debug for Ref<'b, T> {
 impl<'b, T: ?Sized + Debug> Debug for RefMut<'b, T> {
     fn fmt(&self, f: &mut Formatter) -> Result {
         Debug::fmt(&*(self.deref()), f)
+    }
+}
+
+#[stable(feature = "core_impl_debug", since = "1.9.0")]
+impl<T: ?Sized + Debug> Debug for UnsafeCell<T> {
+    fn fmt(&self, f: &mut Formatter) -> Result {
+        f.pad("UnsafeCell")
     }
 }
 

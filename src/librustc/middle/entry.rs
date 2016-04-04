@@ -9,22 +9,21 @@
 // except according to those terms.
 
 
-use ast_map;
+use dep_graph::DepNode;
+use front::map as ast_map;
+use middle::def_id::{CRATE_DEF_INDEX};
 use session::{config, Session};
-use syntax::ast::{Name, NodeId, Item, ItemFn};
+use syntax::ast::NodeId;
 use syntax::attr;
 use syntax::codemap::Span;
-use syntax::parse::token;
-use syntax::visit;
-use syntax::visit::Visitor;
+use syntax::entry::EntryPointType;
+use rustc_front::hir::{Item, ItemFn};
+use rustc_front::intravisit::Visitor;
 
-struct EntryContext<'a, 'ast: 'a> {
+struct EntryContext<'a, 'tcx: 'a> {
     session: &'a Session,
 
-    ast_map: &'a ast_map::Map<'ast>,
-
-    // The interned Name for "main".
-    main_name: Name,
+    map: &'a ast_map::Map<'tcx>,
 
     // The top-level function called 'main'
     main_fn: Option<(NodeId, Span)>,
@@ -40,13 +39,18 @@ struct EntryContext<'a, 'ast: 'a> {
     non_main_fns: Vec<(NodeId, Span)> ,
 }
 
-impl<'a, 'ast, 'v> Visitor<'v> for EntryContext<'a, 'ast> {
-    fn visit_item(&mut self, item: &Item) {
-        find_item(item, self);
+impl<'a, 'tcx> Visitor<'tcx> for EntryContext<'a, 'tcx> {
+    fn visit_item(&mut self, item: &'tcx Item) {
+        let def_id = self.map.local_def_id(item.id);
+        let def_key = self.map.def_key(def_id);
+        let at_root = def_key.parent == Some(CRATE_DEF_INDEX);
+        find_item(item, self, at_root);
     }
 }
 
 pub fn find_entry_point(session: &Session, ast_map: &ast_map::Map) {
+    let _task = ast_map.dep_graph.in_task(DepNode::EntryPoint);
+
     let any_exe = session.crate_types.borrow().iter().any(|ty| {
         *ty == config::CrateTypeExecutable
     });
@@ -63,61 +67,74 @@ pub fn find_entry_point(session: &Session, ast_map: &ast_map::Map) {
 
     let mut ctxt = EntryContext {
         session: session,
-        main_name: token::intern("main"),
-        ast_map: ast_map,
+        map: ast_map,
         main_fn: None,
         attr_main_fn: None,
         start_fn: None,
         non_main_fns: Vec::new(),
     };
 
-    visit::walk_crate(&mut ctxt, ast_map.krate());
+    ast_map.krate().visit_all_items(&mut ctxt);
 
     configure_main(&mut ctxt);
 }
 
-fn find_item(item: &Item, ctxt: &mut EntryContext) {
+// Beware, this is duplicated in libsyntax/entry.rs, make sure to keep
+// them in sync.
+fn entry_point_type(item: &Item, at_root: bool) -> EntryPointType {
     match item.node {
         ItemFn(..) => {
-            if item.ident.name == ctxt.main_name {
-                 ctxt.ast_map.with_path(item.id, |path| {
-                        if path.count() == 1 {
-                            // This is a top-level function so can be 'main'
-                            if ctxt.main_fn.is_none() {
-                                ctxt.main_fn = Some((item.id, item.span));
-                            } else {
-                                span_err!(ctxt.session, item.span, E0136,
-                                          "multiple 'main' functions");
-                            }
-                        } else {
-                            // This isn't main
-                            ctxt.non_main_fns.push((item.id, item.span));
-                        }
-                });
-            }
-
-            if attr::contains_name(&item.attrs, "main") {
-                if ctxt.attr_main_fn.is_none() {
-                    ctxt.attr_main_fn = Some((item.id, item.span));
-                } else {
-                    span_err!(ctxt.session, item.span, E0137,
-                              "multiple functions with a #[main] attribute");
-                }
-            }
-
             if attr::contains_name(&item.attrs, "start") {
-                if ctxt.start_fn.is_none() {
-                    ctxt.start_fn = Some((item.id, item.span));
+                EntryPointType::Start
+            } else if attr::contains_name(&item.attrs, "main") {
+                EntryPointType::MainAttr
+            } else if item.name.as_str() == "main" {
+                if at_root {
+                    // This is a top-level function so can be 'main'
+                    EntryPointType::MainNamed
                 } else {
-                    span_err!(ctxt.session, item.span, E0138,
-                              "multiple 'start' functions");
+                    EntryPointType::OtherMain
                 }
+            } else {
+                EntryPointType::None
             }
         }
-        _ => ()
+        _ => EntryPointType::None,
     }
+}
 
-    visit::walk_item(ctxt, item);
+
+fn find_item(item: &Item, ctxt: &mut EntryContext, at_root: bool) {
+    match entry_point_type(item, at_root) {
+        EntryPointType::MainNamed => {
+            if ctxt.main_fn.is_none() {
+                ctxt.main_fn = Some((item.id, item.span));
+            } else {
+                span_err!(ctxt.session, item.span, E0136,
+                          "multiple 'main' functions");
+            }
+        },
+        EntryPointType::OtherMain => {
+            ctxt.non_main_fns.push((item.id, item.span));
+        },
+        EntryPointType::MainAttr => {
+            if ctxt.attr_main_fn.is_none() {
+                ctxt.attr_main_fn = Some((item.id, item.span));
+            } else {
+                span_err!(ctxt.session, item.span, E0137,
+                          "multiple functions with a #[main] attribute");
+            }
+        },
+        EntryPointType::Start => {
+            if ctxt.start_fn.is_none() {
+                ctxt.start_fn = Some((item.id, item.span));
+            } else {
+                span_err!(ctxt.session, item.span, E0138,
+                          "multiple 'start' functions");
+            }
+        },
+        EntryPointType::None => ()
+    }
 }
 
 fn configure_main(this: &mut EntryContext) {
@@ -132,17 +149,20 @@ fn configure_main(this: &mut EntryContext) {
         this.session.entry_type.set(Some(config::EntryMain));
     } else {
         // No main function
-        this.session.err("main function not found");
+        let mut err = this.session.struct_err("main function not found");
         if !this.non_main_fns.is_empty() {
             // There were some functions named 'main' though. Try to give the user a hint.
-            this.session.note("the main function must be defined at the crate level \
-                               but you have one or more functions named 'main' that are not \
-                               defined at the crate level. Either move the definition or \
-                               attach the `#[main]` attribute to override this behavior.");
+            err.note("the main function must be defined at the crate level \
+                      but you have one or more functions named 'main' that are not \
+                      defined at the crate level. Either move the definition or \
+                      attach the `#[main]` attribute to override this behavior.");
             for &(_, span) in &this.non_main_fns {
-                this.session.span_note(span, "here is a function named 'main'");
+                err.span_note(span, "here is a function named 'main'");
             }
+            err.emit();
             this.session.abort_if_errors();
+        } else {
+            err.emit();
         }
     }
 }

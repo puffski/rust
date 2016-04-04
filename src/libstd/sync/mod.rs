@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! Useful synchronization primitives
+//! Useful synchronization primitives.
 //!
 //! This module contains useful safe and unsafe synchronization primitives.
 //! Most of the primitives in this module do not provide any sort of locking
@@ -17,28 +17,32 @@
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
+#[stable(feature = "rust1", since = "1.0.0")]
 pub use alloc::arc::{Arc, Weak};
-pub use core::atomic;
+#[stable(feature = "rust1", since = "1.0.0")]
+pub use core::sync::atomic;
 
+#[stable(feature = "rust1", since = "1.0.0")]
 pub use self::barrier::{Barrier, BarrierWaitResult};
-pub use self::condvar::{Condvar, StaticCondvar, CONDVAR_INIT};
+#[stable(feature = "rust1", since = "1.0.0")]
+pub use self::condvar::{Condvar, StaticCondvar, WaitTimeoutResult, CONDVAR_INIT};
+#[stable(feature = "rust1", since = "1.0.0")]
 pub use self::mutex::MUTEX_INIT;
+#[stable(feature = "rust1", since = "1.0.0")]
 pub use self::mutex::{Mutex, MutexGuard, StaticMutex};
+#[stable(feature = "rust1", since = "1.0.0")]
 pub use self::once::{Once, ONCE_INIT};
+#[stable(feature = "rust1", since = "1.0.0")]
 pub use sys_common::poison::{PoisonError, TryLockError, TryLockResult, LockResult};
+#[stable(feature = "rust1", since = "1.0.0")]
 pub use self::rwlock::{RwLockReadGuard, RwLockWriteGuard};
+#[stable(feature = "rust1", since = "1.0.0")]
 pub use self::rwlock::{RwLock, StaticRwLock, RW_LOCK_INIT};
-pub use self::semaphore::{Semaphore, SemaphoreGuard};
-
-#[allow(deprecated)]
-pub use self::future::Future;
 
 pub mod mpsc;
 
 mod barrier;
 mod condvar;
-mod future;
 mod mutex;
 mod once;
 mod rwlock;
-mod semaphore;

@@ -8,6 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+use std::borrow::Cow;
 use std::iter::{FromIterator, repeat};
 use std::mem::size_of;
 
@@ -255,23 +256,6 @@ fn test_zip_unzip() {
 }
 
 #[test]
-fn test_unsafe_ptrs() {
-    unsafe {
-        // Test on-stack copy-from-buf.
-        let a = [1, 2, 3];
-        let ptr = a.as_ptr();
-        let b = Vec::from_raw_buf(ptr, 3);
-        assert_eq!(b, [1, 2, 3]);
-
-        // Test on-heap copy-from-buf.
-        let c = vec![1, 2, 3, 4, 5];
-        let ptr = c.as_ptr();
-        let d = Vec::from_raw_buf(ptr, 5);
-        assert_eq!(d, [1, 2, 3, 4, 5]);
-    }
-}
-
-#[test]
 fn test_vec_truncate_drop() {
     static mut drops: u32 = 0;
     struct Elem(i32);
@@ -323,7 +307,7 @@ fn test_index_out_of_bounds() {
 #[should_panic]
 fn test_slice_out_of_bounds_1() {
     let x = vec![1, 2, 3, 4, 5];
-    &x[-1..];
+    &x[!0..];
 }
 
 #[test]
@@ -337,7 +321,7 @@ fn test_slice_out_of_bounds_2() {
 #[should_panic]
 fn test_slice_out_of_bounds_3() {
     let x = vec![1, 2, 3, 4, 5];
-    &x[-1..4];
+    &x[!0..4];
 }
 
 #[test]
@@ -359,67 +343,6 @@ fn test_slice_out_of_bounds_5() {
 fn test_swap_remove_empty() {
     let mut vec= Vec::<i32>::new();
     vec.swap_remove(0);
-}
-
-#[test]
-fn test_move_iter_unwrap() {
-    let mut vec = Vec::with_capacity(7);
-    vec.push(1);
-    vec.push(2);
-    let ptr = vec.as_ptr();
-    vec = vec.into_iter().into_inner();
-    assert_eq!(vec.as_ptr(), ptr);
-    assert_eq!(vec.capacity(), 7);
-    assert_eq!(vec.len(), 0);
-}
-
-#[test]
-#[should_panic]
-fn test_map_in_place_incompatible_types_fail() {
-    let v = vec![0, 1, 2];
-    v.map_in_place(|_| ());
-}
-
-#[test]
-fn test_map_in_place() {
-    let v = vec![0, 1, 2];
-    assert_eq!(v.map_in_place(|i: u32| i as i32 - 1), [-1, 0, 1]);
-}
-
-#[test]
-fn test_map_in_place_zero_sized() {
-    let v = vec![(), ()];
-    #[derive(PartialEq, Debug)]
-    struct ZeroSized;
-    assert_eq!(v.map_in_place(|_| ZeroSized), [ZeroSized, ZeroSized]);
-}
-
-#[test]
-fn test_map_in_place_zero_drop_count() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    #[derive(Clone, PartialEq, Debug)]
-    struct Nothing;
-    impl Drop for Nothing { fn drop(&mut self) { } }
-
-    #[derive(Clone, PartialEq, Debug)]
-    struct ZeroSized;
-    impl Drop for ZeroSized {
-        fn drop(&mut self) {
-            DROP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-    const NUM_ELEMENTS: usize = 2;
-    static DROP_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-    let v = repeat(Nothing).take(NUM_ELEMENTS).collect::<Vec<_>>();
-
-    DROP_COUNTER.store(0, Ordering::Relaxed);
-
-    let v = v.map_in_place(|_| ZeroSized);
-    assert_eq!(DROP_COUNTER.load(Ordering::Relaxed), 0);
-    drop(v);
-    assert_eq!(DROP_COUNTER.load(Ordering::Relaxed), NUM_ELEMENTS);
 }
 
 #[test]
@@ -542,6 +465,34 @@ fn test_split_off() {
 #[test]
 fn test_into_iter_count() {
     assert_eq!(vec![1, 2, 3].into_iter().count(), 3);
+}
+
+#[test]
+fn test_into_iter_clone() {
+    fn iter_equal<I: Iterator<Item=i32>>(it: I, slice: &[i32]) {
+        let v: Vec<i32> = it.collect();
+        assert_eq!(&v[..], slice);
+    }
+    let mut it = vec![1, 2, 3].into_iter();
+    iter_equal(it.clone(), &[1, 2, 3]);
+    assert_eq!(it.next(), Some(1));
+    let mut it = it.rev();
+    iter_equal(it.clone(), &[3, 2]);
+    assert_eq!(it.next(), Some(3));
+    iter_equal(it.clone(), &[2]);
+    assert_eq!(it.next(), Some(2));
+    iter_equal(it.clone(), &[]);
+    assert_eq!(it.next(), None);
+}
+
+#[test]
+fn test_cow_from() {
+    let borrowed: &[_] = &["borrowed", "(slice)"];
+    let owned = vec!["owned", "(vec)"];
+    match (Cow::from(owned.clone()), Cow::from(borrowed)) {
+        (Cow::Owned(o), Cow::Borrowed(b)) => assert!(o == owned && b == borrowed),
+        _ => panic!("invalid `Cow::from`"),
+    }
 }
 
 #[bench]
@@ -764,7 +715,7 @@ fn do_bench_push_all(b: &mut Bencher, dst_len: usize, src_len: usize) {
 
     b.iter(|| {
         let mut dst = dst.clone();
-        dst.push_all(&src);
+        dst.extend_from_slice(&src);
         assert_eq!(dst.len(), dst_len + src_len);
         assert!(dst.iter().enumerate().all(|(i, x)| i == *x));
     });

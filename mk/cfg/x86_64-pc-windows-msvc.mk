@@ -23,7 +23,6 @@ CFG_RUN_x86_64-pc-windows-msvc=$(2)
 CFG_RUN_TARG_x86_64-pc-windows-msvc=$(call CFG_RUN_x86_64-pc-windows-msvc,,$(2))
 CFG_GNU_TRIPLE_x86_64-pc-windows-msvc := x86_64-pc-win32
 
-# All windows nightiles are currently a GNU triple, so this MSVC triple is not
-# bootstrapping from itself. This is relevant during stage0, and other parts of
-# the build system take this into account.
-BOOTSTRAP_FROM_x86_64-pc-windows-msvc := x86_64-pc-windows-gnu
+# Currently the build system is not configured to build jemalloc
+# with MSVC, so we omit this optional dependency.
+CFG_DISABLE_JEMALLOC_x86_64-pc-windows-msvc := 1

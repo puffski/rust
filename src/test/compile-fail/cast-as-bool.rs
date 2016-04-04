@@ -8,5 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// error-pattern: cannot cast as `bool`, compare with zero instead
-fn main() { let u = (5 as bool); }
+fn main() {
+    let u = 5 as bool;
+    //~^ ERROR cannot cast as `bool`
+    //~^^ HELP compare with zero instead
+    //~^^^ HELP run `rustc --explain E0054` to see a detailed explanation
+}

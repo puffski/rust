@@ -13,8 +13,6 @@ use target::Target;
 pub fn target() -> Target {
     let mut base = super::windows_base::opts();
     base.cpu = "x86-64".to_string();
-    // On Win64 unwinding is handled by the OS, so we can link libgcc statically.
-    base.pre_link_args.push("-static-libgcc".to_string());
     base.pre_link_args.push("-m64".to_string());
 
     Target {
@@ -24,6 +22,7 @@ pub fn target() -> Target {
         arch: "x86_64".to_string(),
         target_os: "windows".to_string(),
         target_env: "gnu".to_string(),
+        target_vendor: "pc".to_string(),
         options: base,
     }
 }

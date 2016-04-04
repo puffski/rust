@@ -11,14 +11,11 @@
 #![crate_type = "bin"]
 
 #![feature(box_syntax)]
-#![feature(dynamic_lib)]
 #![feature(libc)]
-#![feature(path_ext)]
 #![feature(rustc_private)]
-#![feature(slice_splits)]
 #![feature(str_char)]
 #![feature(test)]
-#![feature(vec_push_all)]
+#![feature(question_mark)]
 
 #![deny(warnings)]
 
@@ -31,10 +28,12 @@ extern crate log;
 
 use std::env;
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
 use getopts::{optopt, optflag, reqopt};
 use common::Config;
 use common::{Pretty, DebugInfoGdb, DebugInfoLldb};
+use test::TestPaths;
 use util::logv;
 
 pub mod procsrv;
@@ -79,6 +78,7 @@ pub fn parse_config(args: Vec<String> ) -> Config {
           optopt("", "host-rustcflags", "flags to pass to rustc for host", "FLAGS"),
           optopt("", "target-rustcflags", "flags to pass to rustc for target", "FLAGS"),
           optflag("", "verbose", "run tests verbosely, showing all output"),
+          optflag("", "quiet", "print one character per test instead of one line"),
           optopt("", "logfile", "file to log test execution to", "FILE"),
           optopt("", "target", "the target to build for", "TARGET"),
           optopt("", "host", "the host to build for", "HOST"),
@@ -91,7 +91,7 @@ pub fn parse_config(args: Vec<String> ) -> Config {
           optflag("h", "help", "show this message"));
 
     let (argv0, args_) = args.split_first().unwrap();
-    if args[1] == "-h" || args[1] == "--help" {
+    if args.len() == 1 || args[1] == "-h" || args[1] == "--help" {
         let message = format!("Usage: {} [OPTIONS] [TESTNAME...]", argv0);
         println!("{}", getopts::usage(&message, &groups));
         println!("");
@@ -118,15 +118,17 @@ pub fn parse_config(args: Vec<String> ) -> Config {
         }
     }
 
-    let filter = if !matches.free.is_empty() {
-        Some(matches.free[0].clone())
-    } else {
-        None
-    };
+    fn make_absolute(path: PathBuf) -> PathBuf {
+        if path.is_relative() {
+            env::current_dir().unwrap().join(path)
+        } else {
+            path
+        }
+    }
 
     Config {
-        compile_lib_path: matches.opt_str("compile-lib-path").unwrap(),
-        run_lib_path: matches.opt_str("run-lib-path").unwrap(),
+        compile_lib_path: make_absolute(opt_path(matches, "compile-lib-path")),
+        run_lib_path: make_absolute(opt_path(matches, "run-lib-path")),
         rustc_path: opt_path(matches, "rustc-path"),
         rustdoc_path: opt_path(matches, "rustdoc-path"),
         python: matches.opt_str("python").unwrap(),
@@ -139,7 +141,7 @@ pub fn parse_config(args: Vec<String> ) -> Config {
         stage_id: matches.opt_str("stage-id").unwrap(),
         mode: matches.opt_str("mode").unwrap().parse().ok().expect("invalid mode"),
         run_ignored: matches.opt_present("ignored"),
-        filter: filter,
+        filter: matches.free.first().cloned(),
         logfile: matches.opt_str("logfile").map(|s| PathBuf::from(&s)),
         runtool: matches.opt_str("runtool"),
         host_rustcflags: matches.opt_str("host-rustcflags"),
@@ -159,6 +161,7 @@ pub fn parse_config(args: Vec<String> ) -> Config {
             !opt_str2(matches.opt_str("adb-test-dir")).is_empty(),
         lldb_python_dir: matches.opt_str("lldb-python-dir"),
         verbose: matches.opt_present("verbose"),
+        quiet: matches.opt_present("quiet"),
     }
 }
 
@@ -177,7 +180,7 @@ pub fn log_config(config: &Config) {
     logv(c, format!("filter: {}",
                     opt_str(&config.filter
                                    .as_ref()
-                                   .map(|re| re.to_string()))));
+                                   .map(|re| re.to_owned()))));
     logv(c, format!("runtool: {}", opt_str(&config.runtool)));
     logv(c, format!("host-rustcflags: {}",
                     opt_str(&config.host_rustcflags)));
@@ -192,6 +195,7 @@ pub fn log_config(config: &Config) {
     logv(c, format!("adb_device_status: {}",
                     config.adb_device_status));
     logv(c, format!("verbose: {}", config.verbose));
+    logv(c, format!("quiet: {}", config.quiet));
     logv(c, format!("\n"));
 }
 
@@ -204,19 +208,16 @@ pub fn opt_str<'a>(maybestr: &'a Option<String>) -> &'a str {
 
 pub fn opt_str2(maybestr: Option<String>) -> String {
     match maybestr {
-        None => "(none)".to_string(),
+        None => "(none)".to_owned(),
         Some(s) => s,
     }
 }
 
 pub fn run_tests(config: &Config) {
     if config.target.contains("android") {
-        match config.mode {
-            DebugInfoGdb => {
-                println!("{} debug-info test uses tcp 5039 port.\
-                         please reserve it", config.target);
-            }
-            _ =>{}
+        if let DebugInfoGdb = config.mode {
+            println!("{} debug-info test uses tcp 5039 port.\
+                     please reserve it", config.target);
         }
 
         // android debug-info test uses remote debugger
@@ -256,15 +257,16 @@ pub fn run_tests(config: &Config) {
 
 pub fn test_opts(config: &Config) -> test::TestOpts {
     test::TestOpts {
-        filter: match config.filter {
-            None => None,
-            Some(ref filter) => Some(filter.clone()),
-        },
+        filter: config.filter.clone(),
         run_ignored: config.run_ignored,
+        quiet: config.quiet,
         logfile: config.logfile.clone(),
         run_tests: true,
         bench_benchmarks: true,
-        nocapture: env::var("RUST_TEST_NOCAPTURE").is_ok(),
+        nocapture: match env::var("RUST_TEST_NOCAPTURE") {
+            Ok(val) => &val != "0",
+            Err(_) => false
+        },
         color: test::AutoColor,
     }
 }
@@ -273,25 +275,71 @@ pub fn make_tests(config: &Config) -> Vec<test::TestDescAndFn> {
     debug!("making tests from {:?}",
            config.src_base.display());
     let mut tests = Vec::new();
-    let dirs = fs::read_dir(&config.src_base).unwrap();
-    for file in dirs {
-        let file = file.unwrap().path();
-        debug!("inspecting file {:?}", file.display());
-        if is_test(config, &file) {
-            tests.push(make_test(config, &file))
+    collect_tests_from_dir(config,
+                           &config.src_base,
+                           &config.src_base,
+                           &PathBuf::new(),
+                           &mut tests)
+        .unwrap();
+    tests
+}
+
+fn collect_tests_from_dir(config: &Config,
+                          base: &Path,
+                          dir: &Path,
+                          relative_dir_path: &Path,
+                          tests: &mut Vec<test::TestDescAndFn>)
+                          -> io::Result<()> {
+    // Ignore directories that contain a file
+    // `compiletest-ignore-dir`.
+    for file in fs::read_dir(dir)? {
+        let file = file?;
+        if file.file_name() == *"compiletest-ignore-dir" {
+            return Ok(());
         }
     }
-    tests
+
+    let dirs = fs::read_dir(dir)?;
+    for file in dirs {
+        let file = file?;
+        let file_path = file.path();
+        debug!("inspecting file {:?}", file_path.display());
+        if is_test(config, &file_path) {
+            // If we find a test foo/bar.rs, we have to build the
+            // output directory `$build/foo` so we can write
+            // `$build/foo/bar` into it. We do this *now* in this
+            // sequential loop because otherwise, if we do it in the
+            // tests themselves, they race for the privilege of
+            // creating the directories and sometimes fail randomly.
+            let build_dir = config.build_base.join(&relative_dir_path);
+            fs::create_dir_all(&build_dir).unwrap();
+
+            let paths = TestPaths {
+                file: file_path,
+                base: base.to_path_buf(),
+                relative_dir: relative_dir_path.to_path_buf(),
+            };
+            tests.push(make_test(config, &paths))
+        } else if file_path.is_dir() {
+            let relative_file_path = relative_dir_path.join(file.file_name());
+            collect_tests_from_dir(config,
+                                   base,
+                                   &file_path,
+                                   &relative_file_path,
+                                   tests)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn is_test(config: &Config, testfile: &Path) -> bool {
     // Pretty-printer does not work with .rc files yet
     let valid_extensions =
         match config.mode {
-          Pretty => vec!(".rs".to_string()),
-          _ => vec!(".rc".to_string(), ".rs".to_string())
+          Pretty => vec!(".rs".to_owned()),
+          _ => vec!(".rc".to_owned(), ".rs".to_owned())
         };
-    let invalid_prefixes = vec!(".".to_string(), "#".to_string(), "~".to_string());
+    let invalid_prefixes = vec!(".".to_owned(), "#".to_owned(), "~".to_owned());
     let name = testfile.file_name().unwrap().to_str().unwrap();
 
     let mut valid = false;
@@ -311,36 +359,47 @@ pub fn is_test(config: &Config, testfile: &Path) -> bool {
     return valid;
 }
 
-pub fn make_test(config: &Config, testfile: &Path) -> test::TestDescAndFn
-{
+pub fn make_test(config: &Config, testpaths: &TestPaths) -> test::TestDescAndFn {
+    let early_props = header::early_props(config, &testpaths.file);
+
+    // The `should-fail` annotation doesn't apply to pretty tests,
+    // since we run the pretty printer across all tests by default.
+    // If desired, we could add a `should-fail-pretty` annotation.
+    let should_panic = match config.mode {
+        Pretty => test::ShouldPanic::No,
+        _ => if early_props.should_fail {
+            test::ShouldPanic::Yes
+        } else {
+            test::ShouldPanic::No
+        }
+    };
+
     test::TestDescAndFn {
         desc: test::TestDesc {
-            name: make_test_name(config, testfile),
-            ignore: header::is_test_ignored(config, testfile),
-            should_panic: test::ShouldPanic::No,
+            name: make_test_name(config, testpaths),
+            ignore: early_props.ignore,
+            should_panic: should_panic,
         },
-        testfn: make_test_closure(config, &testfile),
+        testfn: make_test_closure(config, testpaths),
     }
 }
 
-pub fn make_test_name(config: &Config, testfile: &Path) -> test::TestName {
-
-    // Try to elide redundant long paths
-    fn shorten(path: &Path) -> String {
-        let filename = path.file_name().unwrap().to_str();
-        let p = path.parent().unwrap();
-        let dir = p.file_name().unwrap().to_str();
-        format!("{}/{}", dir.unwrap_or(""), filename.unwrap_or(""))
-    }
-
-    test::DynTestName(format!("[{}] {}", config.mode, shorten(testfile)))
+pub fn make_test_name(config: &Config, testpaths: &TestPaths) -> test::TestName {
+    // Convert a complete path to something like
+    //
+    //    run-pass/foo/bar/baz.rs
+    let path =
+        PathBuf::from(config.mode.to_string())
+        .join(&testpaths.relative_dir)
+        .join(&testpaths.file.file_name().unwrap());
+    test::DynTestName(format!("[{}] {}", config.mode, path.display()))
 }
 
-pub fn make_test_closure(config: &Config, testfile: &Path) -> test::TestFn {
-    let config = (*config).clone();
-    let testfile = testfile.to_path_buf();
+pub fn make_test_closure(config: &Config, testpaths: &TestPaths) -> test::TestFn {
+    let config = config.clone();
+    let testpaths = testpaths.clone();
     test::DynTestFn(Box::new(move || {
-        runtest::run(config, &testfile)
+        runtest::run(config, &testpaths)
     }))
 }
 
@@ -350,7 +409,7 @@ fn extract_gdb_version(full_version_line: Option<String>) -> Option<String> {
           if !full_version_line.trim().is_empty() => {
             let full_version_line = full_version_line.trim();
 
-            // used to be a regex "(^|[^0-9])([0-9]\.[0-9])([^0-9]|$)"
+            // used to be a regex "(^|[^0-9])([0-9]\.[0-9]+)"
             for (pos, c) in full_version_line.char_indices() {
                 if !c.is_digit(10) { continue }
                 if pos + 2 >= full_version_line.len() { continue }
@@ -359,11 +418,12 @@ fn extract_gdb_version(full_version_line: Option<String>) -> Option<String> {
                 if pos > 0 && full_version_line.char_at_reverse(pos).is_digit(10) {
                     continue
                 }
-                if pos + 3 < full_version_line.len() &&
-                   full_version_line.char_at(pos + 3).is_digit(10) {
-                    continue
+                let mut end = pos + 3;
+                while end < full_version_line.len() &&
+                      full_version_line.char_at(end).is_digit(10) {
+                    end += 1;
                 }
-                return Some(full_version_line[pos..pos+3].to_string());
+                return Some(full_version_line[pos..end].to_owned());
             }
             println!("Could not extract GDB version from line '{}'",
                      full_version_line);
@@ -385,9 +445,8 @@ fn extract_lldb_version(full_version_line: Option<String>) -> Option<String> {
     // We are only interested in the major version number, so this function
     // will return `Some("179")` and `Some("300")` respectively.
 
-    match full_version_line {
-        Some(ref full_version_line)
-          if !full_version_line.trim().is_empty() => {
+    if let Some(ref full_version_line) = full_version_line {
+        if !full_version_line.trim().is_empty() {
             let full_version_line = full_version_line.trim();
 
             for (pos, l) in full_version_line.char_indices() {
@@ -409,8 +468,7 @@ fn extract_lldb_version(full_version_line: Option<String>) -> Option<String> {
             }
             println!("Could not extract LLDB version from line '{}'",
                      full_version_line);
-            None
-        },
-        _ => None
+        }
     }
+    None
 }

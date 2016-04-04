@@ -13,13 +13,9 @@
 # this exists can be found on issue #2400
 export CFG_COMPILER_HOST_TRIPLE
 
-# The standard libraries should be held up to a higher standard than any old
-# code, make sure that these common warnings are denied by default. These can
-# be overridden during development temporarily. For stage0, we allow warnings
-# which may be bugs in stage0 (should be fixed in stage1+)
-RUST_LIB_FLAGS_ST0 += -W warnings
-RUST_LIB_FLAGS_ST1 += -D warnings
-RUST_LIB_FLAGS_ST2 += -D warnings
+# Used as defaults for the runtime ar and cc tools
+export CFG_DEFAULT_LINKER
+export CFG_DEFAULT_AR
 
 # Macro that generates the full list of dependencies for a crate at a particular
 # stage/target/host tuple.
@@ -32,15 +28,12 @@ define RUST_CRATE_FULLDEPS
 CRATE_FULLDEPS_$(1)_T_$(2)_H_$(3)_$(4) := \
 		$$(CRATEFILE_$(4)) \
 		$$(RSINPUTS_$(4)) \
-		$$(foreach dep,$$(RUST_DEPS_$(4)), \
+		$$(foreach dep,$$(RUST_DEPS_$(4)_T_$(2)), \
 		  $$(TLIB$(1)_T_$(2)_H_$(3))/stamp.$$(dep)) \
 		$$(foreach dep,$$(NATIVE_DEPS_$(4)), \
 		  $$(RT_OUTPUT_DIR_$(2))/$$(call CFG_STATIC_LIB_NAME_$(2),$$(dep))) \
 		$$(foreach dep,$$(NATIVE_DEPS_$(4)_T_$(2)), \
-		  $$(RT_OUTPUT_DIR_$(2))/$$(dep)) \
-		$$(foreach dep,$$(NATIVE_TOOL_DEPS_$(4)_T_$(2)), \
-		  $$(TBIN$(1)_T_$(3)_H_$(3))/$$(dep)) \
-		$$(CUSTOM_DEPS_$(4)_T_$(2))
+		  $$(RT_OUTPUT_DIR_$(2))/$$(dep))
 endef
 
 $(foreach host,$(CFG_HOST), \
@@ -56,8 +49,7 @@ $(foreach host,$(CFG_HOST), \
 #   1. The immediate dependencies are the rust source files
 #   2. Each rust crate dependency is listed (based on their stamp files),
 #      as well as all native dependencies (listed in RT_OUTPUT_DIR)
-#   3. The stage (n-1) compiler is required through the TSREQ dependency, along
-#      with the morestack library
+#   3. The stage (n-1) compiler is required through the TSREQ dependency
 #   4. When actually executing the rule, the first thing we do is to clean out
 #      old libs and rlibs via the REMOVE_ALL_OLD_GLOB_MATCHES macro
 #   5. Finally, we get around to building the actual crate. It's just one
@@ -93,9 +85,11 @@ $$(TLIB$(1)_T_$(2)_H_$(3))/stamp.$(4): \
 		$$(LLVM_LIBDIR_RUSTFLAGS_$(2)) \
 		$$(LLVM_STDCPP_RUSTFLAGS_$(2)) \
 		$$(RUSTFLAGS_$(4)) \
-		$$(RUSTFLAGS_$(4)_T_$(2)) \
+		$$(RUSTFLAGS$(1)_$(4)) \
+		$$(RUSTFLAGS$(1)_$(4)_T_$(2)) \
 		--out-dir $$(@D) \
 		-C extra-filename=-$$(CFG_FILENAME_EXTRA) \
+		-C metadata=$$(CFG_FILENAME_EXTRA) \
 		$$<
 	@touch -r $$@.start_time $$@ && rm $$@.start_time
 	$$(call LIST_ALL_OLD_GLOB_MATCHES, \
@@ -127,7 +121,37 @@ $$(TBIN$(1)_T_$(2)_H_$(3))/$(4)$$(X_$(2)): \
 		$$(TSREQ$(1)_T_$(2)_H_$(3)) \
 		| $$(TBIN$(1)_T_$(2)_H_$(3))/
 	@$$(call E, rustc: $$@)
-	$$(STAGE$(1)_T_$(2)_H_$(3)) -o $$@ $$< --cfg $(4)
+	$$(STAGE$(1)_T_$(2)_H_$(3)) \
+		$$(LLVM_LIBDIR_RUSTFLAGS_$(2)) \
+		-o $$@ $$< --cfg $(4)
+
+endef
+
+# Macro for building runtime startup/shutdown object files;
+# these are Rust's equivalent of crti.o, crtn.o
+#
+# $(1) - stage
+# $(2) - target triple
+# $(3) - host triple
+# $(4) - object basename
+define TARGET_RUSTRT_STARTUP_OBJ
+
+$$(TLIB$(1)_T_$(2)_H_$(3))/$(4).o: \
+		$(S)src/rtstartup/$(4).rs \
+		$$(TLIB$(1)_T_$(2)_H_$(3))/stamp.core \
+		$$(HSREQ$(1)_T_$(2)_H_$(3)) \
+		| $$(TBIN$(1)_T_$(2)_H_$(3))/
+	@$$(call E, rustc: $$@)
+	$$(STAGE$(1)_T_$(2)_H_$(3)) --emit=obj -o $$@ $$<
+
+ifeq ($$(CFG_RUSTRT_HAS_STARTUP_OBJS_$(2)), 1)
+# Add dependencies on Rust startup objects to all crates that depend on core.
+# This ensures that they are built after core (since they depend on it),
+# but before everything else (since they are needed for linking dylib crates).
+$$(foreach crate, $$(TARGET_CRATES_$(2)), \
+	$$(if $$(findstring core,$$(DEPS_$$(crate))), \
+		$$(TLIB$(1)_T_$(2)_H_$(3))/stamp.$$(crate))) : $$(TLIB$(1)_T_$(2)_H_$(3))/$(4).o
+endif
 
 endef
 
@@ -143,19 +167,11 @@ SNAPSHOT_RUSTC_POST_CLEANUP=$(HBIN0_H_$(CFG_BUILD))/rustc$(X_$(CFG_BUILD))
 
 define TARGET_HOST_RULES
 
-$$(TBIN$(1)_T_$(2)_H_$(3))/:
-	mkdir -p $$@
-
 $$(TLIB$(1)_T_$(2)_H_$(3))/:
 	mkdir -p $$@
 
 $$(TLIB$(1)_T_$(2)_H_$(3))/%: $$(RT_OUTPUT_DIR_$(2))/% \
 	    | $$(TLIB$(1)_T_$(2)_H_$(3))/ $$(SNAPSHOT_RUSTC_POST_CLEANUP)
-	@$$(call E, cp: $$@)
-	$$(Q)cp $$< $$@
-
-$$(TBIN$(1)_T_$(2)_H_$(3))/%: $$(CFG_LLVM_INST_DIR_$(2))/bin/% \
-	    | $$(TBIN$(1)_T_$(2)_H_$(3))/ $$(SNAPSHOT_RUSTC_POST_CLEANUP)
 	@$$(call E, cp: $$@)
 	$$(Q)cp $$< $$@
 endef
@@ -182,76 +198,8 @@ $(foreach host,$(CFG_HOST), \
    $(foreach tool,$(TOOLS), \
     $(eval $(call TARGET_TOOL,$(stage),$(target),$(host),$(tool)))))))
 
-# We have some triples which are bootstrapped from other triples, and this means
-# that we need to fixup some of the native tools that a triple depends on.
-#
-# For example, MSVC requires the llvm-ar.exe executable to manage archives, but
-# it bootstraps from the GNU Windows triple. This means that the compiler will
-# add this directory to PATH when executing new processes:
-#
-# 	$SYSROOT/rustlib/x86_64-pc-windows-gnu/bin
-#
-# Unfortunately, however, the GNU triple is not known about in stage0, so the
-# tools are actually located in:
-#
-# 	$SYSROOT/rustlib/x86_64-pc-windows-msvc/bin
-#
-# To remedy this problem, the rules below copy all native tool dependencies into
-# the bootstrap triple's location in stage 0 so the bootstrap compiler can find
-# the right sets of tools. Later stages (1+) will have the right host triple for
-# the compiler, so there's no need to worry there.
-#
-# $(1) - stage
-# $(2) - triple that's being used as host/target
-# $(3) - triple snapshot is built for
-# $(4) - crate
-# $(5) - tool
-define MOVE_TOOLS_TO_SNAPSHOT_HOST_DIR
-ifneq (,$(3))
-$$(TLIB$(1)_T_$(2)_H_$(2))/stamp.$(4): $$(HLIB$(1)_H_$(2))/rustlib/$(3)/bin/$(5)
-
-$$(HLIB$(1)_H_$(2))/rustlib/$(3)/bin/$(5): $$(TBIN$(1)_T_$(2)_H_$(2))/$(5)
-	mkdir -p $$(@D)
-	cp $$< $$@
-endif
-endef
-
-$(foreach target,$(CFG_TARGET), \
- $(foreach crate,$(CRATES), \
-  $(foreach tool,$(NATIVE_TOOL_DEPS_$(crate)_T_$(target)), \
-   $(eval $(call MOVE_TOOLS_TO_SNAPSHOT_HOST_DIR,0,$(target),$(BOOTSTRAP_FROM_$(target)),$(crate),$(tool))))))
-
-# For MSVC targets we need to set up some environment variables for the linker
-# to work correctly when building Rust crates. These two variables are:
-#
-# - LIB tells the linker the default search path for finding system libraries,
-#   for example kernel32.dll
-# - PATH needs to be modified to ensure that MSVC's link.exe is first in the
-#   path instead of MinGW's /usr/bin/link.exe (entirely unrelated)
-#
-# The values for these variables are detected by the configure script.
-define SETUP_LIB_MSVC_ENV_VARS
-ifeq ($$(findstring msvc,$(2)),msvc)
-$$(TLIB$(1)_T_$(2)_H_$(3))/stamp.$(4): \
-	export LIB := $$(CFG_MSVC_LIB_PATH_$$(HOST_$(2)))
-$$(TLIB$(1)_T_$(2)_H_$(3))/stamp.$(4): \
-	export PATH := $$(CFG_MSVC_BINDIR_$$(HOST_$(2))):$$(PATH)
-endif
-endef
-define SETUP_TOOL_MSVC_ENV_VARS
-ifeq ($$(findstring msvc,$(2)),msvc)
-$$(TBIN$(1)_T_$(2)_H_$(3))/$(4)$$(X_$(2)): \
-	export LIB := $$(CFG_MSVC_LIB_PATH_$$(HOST_$(2)))
-$$(TBIN$(1)_T_$(2)_H_$(3))/$(4)$$(X_$(2)): \
-	export PATH := $$(CFG_MSVC_BINDIR_$$(HOST_$(2))):$$(PATH)
-endif
-endef
-
 $(foreach host,$(CFG_HOST), \
  $(foreach target,$(CFG_TARGET), \
-  $(foreach crate,$(CRATES), \
-   $(eval $(call SETUP_LIB_MSVC_ENV_VARS,0,$(target),$(host),$(crate))))))
-$(foreach host,$(CFG_HOST), \
- $(foreach target,$(CFG_TARGET), \
-  $(foreach tool,$(TOOLS), \
-   $(eval $(call SETUP_TOOL_MSVC_ENV_VARS,0,$(target),$(host),$(tool))))))
+  $(foreach stage,$(STAGES), \
+   $(foreach obj,rsbegin rsend, \
+    $(eval $(call TARGET_RUSTRT_STARTUP_OBJ,$(stage),$(target),$(host),$(obj)))))))

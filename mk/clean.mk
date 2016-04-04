@@ -65,7 +65,8 @@ clean-generic-$(2)-$(1):
          -name '*.def' -o \
          -name '*.py' -o \
          -name '*.pyc' -o \
-         -name '*.bc' \
+         -name '*.bc' -o \
+         -name '*.rs' \
          \) \
          | xargs rm -f
 	$(Q)find $(1) \
@@ -101,7 +102,6 @@ define CLEAN_TARGET_STAGE_N
 clean$(1)_T_$(2)_H_$(3): \
 	    $$(foreach crate,$$(CRATES),clean$(1)_T_$(2)_H_$(3)-lib-$$(crate)) \
 	    $$(foreach tool,$$(TOOLS) $$(DEBUGGER_BIN_SCRIPTS_ALL),clean$(1)_T_$(2)_H_$(3)-tool-$$(tool))
-	$$(Q)rm -f $$(TLIB$(1)_T_$(2)_H_$(3))/libmorestack.a
 	$$(Q)rm -f $$(TLIB$(1)_T_$(2)_H_$(3))/libcompiler-rt.a
 	$(Q)rm -f $$(TLIB$(1)_T_$(2)_H_$(3))/librun_pass_stage* # For unix
 	$(Q)rm -f $$(TLIB$(1)_T_$(2)_H_$(3))/run_pass_stage* # For windows

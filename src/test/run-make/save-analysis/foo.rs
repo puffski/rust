@@ -287,6 +287,26 @@ pub struct blah {
     used_link_args: RefCell<[&'static str; 0]>,
 }
 
+#[macro_use]
+mod macro_use_test {
+    macro_rules! test_rec {
+        (q, $src: expr) => {{
+            print!("{}", $src);
+            test_rec!($src);
+        }};
+        ($src: expr) => {
+            print!("{}", $src);
+        };
+    }
+
+    macro_rules! internal_vars {
+        ($src: ident) => {{
+            let mut x = $src;
+            x += 100;
+        }};
+    }
+}
+
 fn main() { // foo
     let s = box some_fields {field1: 43};
     hello((43, "a".to_string()), *s);
@@ -339,7 +359,31 @@ fn main() { // foo
     if let SomeEnum::Strings(..) = s7 {
         println!("hello!");
     }
+
+    for i in 0..5 {
+        foo_foo(i);
+    }
+
+    if let Some(x) = None {
+        foo_foo(x);
+    }
+
+    if false {
+    } else if let Some(y) = None {
+        foo_foo(y);
+    }
+
+    while let Some(z) = None {
+        foo_foo(z);
+    }
+
+    let mut x = 4;
+    test_rec!(q, "Hello");
+    assert_eq!(x, 4);
+    internal_vars!(x);
 }
+
+fn foo_foo(_: i32) {}
 
 impl Iterator for nofields {
     type Item = (usize, usize);
@@ -378,4 +422,17 @@ impl Error + 'static + Send {
     pub fn is<T: Error + 'static>(&self) -> bool {
         <Error + 'static>::is::<T>(self)
     }
+}
+extern crate serialize;
+#[derive(Clone, Copy, Hash, Encodable, Decodable, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
+struct AllDerives(i32);
+
+fn test_format_args() {
+    let x = 1;
+    let y = 2;
+    let name = "Joe Blogg";
+    println!("Hello {}", name);
+    print!("Hello {0}", name);
+    print!("{0} + {} = {}", x, y);
+    print!("x is {}, y is {1}, name is {n}", x, y, n = name);
 }

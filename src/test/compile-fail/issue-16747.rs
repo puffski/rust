@@ -15,10 +15,11 @@ trait ListItem<'a> {
 trait Collection { fn len(&self) -> usize; }
 
 struct List<'a, T: ListItem<'a>> {
+    slice: &'a [T]
 //~^ ERROR the parameter type `T` may not live long enough
 //~| HELP consider adding an explicit lifetime bound
 //~| NOTE ...so that the reference type `&'a [T]` does not outlive the data it points at
-    slice: &'a [T]
+//~| HELP run `rustc --explain E0309` to see a detailed explanation
 }
 impl<'a, T: ListItem<'a>> Collection for List<'a, T> {
     fn len(&self) -> usize {

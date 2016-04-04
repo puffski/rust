@@ -31,13 +31,24 @@ fn dummy() {
     impl !Send for TestType {}
 
     Outer(TestType);
-    //~^ ERROR the trait `core::marker::Send` is not implemented for the type `dummy::TestType`
+    //~^ ERROR the trait `std::marker::Send` is not implemented for the type `dummy::TestType`
+    //~| ERROR the trait `std::marker::Send` is not implemented for the type `dummy::TestType`
+}
+
+fn dummy1b() {
+    struct TestType;
+    impl !Send for TestType {}
 
     is_send(TestType);
-    //~^ ERROR the trait `core::marker::Send` is not implemented for the type `dummy::TestType`
+    //~^ ERROR the trait `std::marker::Send` is not implemented for the type `dummy1b::TestType`
+}
+
+fn dummy1c() {
+    struct TestType;
+    impl !Send for TestType {}
 
     is_send((8, TestType));
-    //~^ ERROR the trait `core::marker::Send` is not implemented for the type `dummy::TestType`
+    //~^ ERROR the trait `std::marker::Send` is not implemented for the type `dummy1c::TestType`
 }
 
 fn dummy2() {
@@ -45,7 +56,7 @@ fn dummy2() {
     impl !Send for TestType {}
 
     is_send(Box::new(TestType));
-    //~^ ERROR the trait `core::marker::Send` is not implemented for the type `dummy2::TestType`
+    //~^ ERROR the trait `std::marker::Send` is not implemented for the type `dummy2::TestType`
 }
 
 fn dummy3() {
@@ -53,7 +64,7 @@ fn dummy3() {
     impl !Send for TestType {}
 
     is_send(Box::new(Outer2(TestType)));
-    //~^ ERROR the trait `core::marker::Send` is not implemented for the type `dummy3::TestType`
+    //~^ ERROR the trait `std::marker::Send` is not implemented for the type `dummy3::TestType`
 }
 
 fn main() {
@@ -63,5 +74,5 @@ fn main() {
     // This will complain about a missing Send impl because `Sync` is implement *just*
     // for T that are `Send`. Look at #20366 and #19950
     is_sync(Outer2(TestType));
-    //~^ ERROR the trait `core::marker::Send` is not implemented for the type `main::TestType`
+    //~^ ERROR the trait `std::marker::Send` is not implemented for the type `main::TestType`
 }

@@ -8,6 +8,12 @@
 # option. This file may not be copied, modified, or distributed
 # except according to those terms.
 
+RUN_INSTALLER = cd tmp/empty_dir && \
+	sh ../../tmp/dist/$(1)/install.sh \
+		--prefix="$(DESTDIR)$(CFG_PREFIX)" \
+		--libdir="$(DESTDIR)$(CFG_LIBDIR)" \
+		--mandir="$(DESTDIR)$(CFG_MANDIR)"
+
 install:
 ifeq (root user, $(USER) $(patsubst %,user,$(SUDO_USER)))
 # Build the dist as the original user
@@ -16,9 +22,11 @@ else
 	$(Q)$(MAKE) prepare_install
 endif
 ifeq ($(CFG_DISABLE_DOCS),)
-	$(Q)cd tmp/empty_dir && sh ../../tmp/dist/$(DOC_PKG_NAME)-$(CFG_BUILD)/install.sh --prefix="$(DESTDIR)$(CFG_PREFIX)" --libdir="$(DESTDIR)$(CFG_LIBDIR)" --mandir="$(DESTDIR)$(CFG_MANDIR)"
+	$(Q)$(call RUN_INSTALLER,$(DOC_PKG_NAME)-$(CFG_BUILD)) --disable-ldconfig
 endif
-	$(Q)cd tmp/empty_dir && sh ../../tmp/dist/$(PKG_NAME)-$(CFG_BUILD)/install.sh --prefix="$(DESTDIR)$(CFG_PREFIX)" --libdir="$(DESTDIR)$(CFG_LIBDIR)" --mandir="$(DESTDIR)$(CFG_MANDIR)"
+	$(Q)$(foreach target,$(CFG_TARGET),\
+	  ($(call RUN_INSTALLER,$(STD_PKG_NAME)-$(target)) --disable-ldconfig);)
+	$(Q)$(call RUN_INSTALLER,$(PKG_NAME)-$(CFG_BUILD))
 # Remove tmp files because it's a decent amount of disk space
 	$(Q)rm -R tmp/dist
 
@@ -32,9 +40,11 @@ else
 	$(Q)$(MAKE) prepare_uninstall
 endif
 ifeq ($(CFG_DISABLE_DOCS),)
-	$(Q)cd tmp/empty_dir && sh ../../tmp/dist/$(DOC_PKG_NAME)-$(CFG_BUILD)/install.sh --uninstall --prefix="$(DESTDIR)$(CFG_PREFIX)" --libdir="$(DESTDIR)$(CFG_LIBDIR)" --mandir="$(DESTDIR)$(CFG_MANDIR)"
+	$(Q)$(call RUN_INSTALLER,$(DOC_PKG_NAME)-$(CFG_BUILD)) --uninstall
 endif
-	$(Q)cd tmp/empty_dir && sh ../../tmp/dist/$(PKG_NAME)-$(CFG_BUILD)/install.sh --uninstall --prefix="$(DESTDIR)$(CFG_PREFIX)" --libdir="$(DESTDIR)$(CFG_LIBDIR)" --mandir="$(DESTDIR)$(CFG_MANDIR)"
+	$(Q)$(call RUN_INSTALLER,$(PKG_NAME)-$(CFG_BUILD)) --uninstall
+	$(Q)$(foreach target,$(CFG_TARGET),\
+	  ($(call RUN_INSTALLER,$(STD_PKG_NAME)-$(target)) --uninstall);)
 # Remove tmp files because it's a decent amount of disk space
 	$(Q)rm -R tmp/dist
 
@@ -98,7 +108,7 @@ endif
 define INSTALL_RUNTIME_TARGET_N
 install-runtime-target-$(1)-host-$(2): $$(TSREQ$$(ISTAGE)_T_$(1)_H_$(2)) $$(SREQ$$(ISTAGE)_T_$(1)_H_$(2))
 	$$(Q)$$(call ADB_SHELL,mkdir,$(CFG_RUNTIME_PUSH_DIR))
-	$$(Q)$$(foreach crate,$$(TARGET_CRATES), \
+	$$(Q)$$(foreach crate,$$(TARGET_CRATES_$(1)), \
 	    $$(call ADB_PUSH,$$(TL$(1)$(2))/$$(call CFG_LIB_GLOB_$(1),$$(crate)), \
 			$$(CFG_RUNTIME_PUSH_DIR));)
 endef
@@ -106,7 +116,7 @@ endef
 define INSTALL_RUNTIME_TARGET_CLEANUP_N
 install-runtime-target-$(1)-cleanup:
 	$$(Q)$$(call ADB,remount)
-	$$(Q)$$(foreach crate,$$(TARGET_CRATES), \
+	$$(Q)$$(foreach crate,$$(TARGET_CRATES_$(1)), \
 	    $$(call ADB_SHELL,rm,$$(CFG_RUNTIME_PUSH_DIR)/$$(call CFG_LIB_GLOB_$(1),$$(crate)));)
 endef
 

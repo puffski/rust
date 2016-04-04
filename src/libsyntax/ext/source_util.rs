@@ -76,7 +76,7 @@ pub fn expand_mod(cx: &mut ExtCtxt, sp: Span, tts: &[ast::TokenTree])
     base::check_zero_tts(cx, sp, tts, "module_path!");
     let string = cx.mod_path()
                    .iter()
-                   .map(|x| token::get_ident(*x).to_string())
+                   .map(|x| x.to_string())
                    .collect::<Vec<String>>()
                    .join("::");
     base::MacEager::expr(cx.expr_str(
@@ -109,19 +109,17 @@ pub fn expand_include<'cx>(cx: &'cx mut ExtCtxt, sp: Span, tts: &[ast::TokenTree
     }
     impl<'a> base::MacResult for ExpandResult<'a> {
         fn make_expr(mut self: Box<ExpandResult<'a>>) -> Option<P<ast::Expr>> {
-            Some(self.p.parse_expr())
+            Some(panictry!(self.p.parse_expr()))
         }
         fn make_items(mut self: Box<ExpandResult<'a>>)
                       -> Option<SmallVector<P<ast::Item>>> {
             let mut ret = SmallVector::zero();
             while self.p.token != token::Eof {
-                match self.p.parse_item() {
+                match panictry!(self.p.parse_item()) {
                     Some(item) => ret.push(item),
-                    None => panic!(self.p.span_fatal(
-                        self.p.span,
-                        &format!("expected item, found `{}`",
-                                 self.p.this_token_to_string())
-                    ))
+                    None => panic!(self.p.diagnostic().span_fatal(self.p.span,
+                                                           &format!("expected item, found `{}`",
+                                                                    self.p.this_token_to_string())))
                 }
             }
             Some(ret)
@@ -189,7 +187,7 @@ pub fn expand_include_bytes(cx: &mut ExtCtxt, sp: Span, tts: &[ast::TokenTree])
             let filename = format!("{}", file.display());
             cx.codemap().new_filemap_and_lines(&filename, "");
 
-            base::MacEager::expr(cx.expr_lit(sp, ast::LitBinary(Rc::new(bytes))))
+            base::MacEager::expr(cx.expr_lit(sp, ast::LitKind::ByteStr(Rc::new(bytes))))
         }
     }
 }

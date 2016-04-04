@@ -127,16 +127,14 @@ functions.
 // only made public for testing. do not expose us.
 #![doc(hidden)]
 #![unstable(feature = "flt2dec",
-            reason = "internal routines only exposed for testing")]
+            reason = "internal routines only exposed for testing",
+            issue = "0")]
 
-use prelude::*;
+use prelude::v1::*;
 use i16;
-use num::Float;
-use slice::bytes;
 pub use self::decoder::{decode, DecodableFloat, FullDecoded, Decoded};
 
 pub mod estimator;
-pub mod bignum;
 pub mod decoder;
 
 /// Digit-generation algorithms.
@@ -212,7 +210,7 @@ impl<'a> Part<'a> {
                     }
                 }
                 Part::Copy(buf) => {
-                    bytes::copy_memory(buf, out);
+                    out[..buf.len()].copy_from_slice(buf);
                 }
             }
             Some(len)
@@ -224,6 +222,7 @@ impl<'a> Part<'a> {
 
 /// Formatted result containing one or more parts.
 /// This can be written to the byte buffer or converted to the allocated string.
+#[allow(missing_debug_implementations)]
 #[derive(Clone)]
 pub struct Formatted<'a> {
     /// A byte slice representing a sign, either `""`, `"-"` or `"+"`.
@@ -247,7 +246,7 @@ impl<'a> Formatted<'a> {
     /// (It may still leave partially written bytes in the buffer; do not rely on that.)
     pub fn write(&self, out: &mut [u8]) -> Option<usize> {
         if out.len() < self.sign.len() { return None; }
-        bytes::copy_memory(self.sign, out);
+        out[..self.sign.len()].copy_from_slice(self.sign);
 
         let mut written = self.sign.len();
         for part in self.parts {
@@ -462,7 +461,7 @@ pub fn to_shortest_str<'a, T, F>(mut format_shortest: F, v: T,
 /// You probably would want `strategy::grisu::format_shortest` for this.
 ///
 /// The `dec_bounds` is a tuple `(lo, hi)` such that the number is formatted
-/// as decimal only when `10^lo <= V < 10^hi`. Note that this is the *apparant* `V`
+/// as decimal only when `10^lo <= V < 10^hi`. Note that this is the *apparent* `V`
 /// instead of the actual `v`! Thus any printed exponent in the exponential form
 /// cannot be in this range, avoiding any confusion.
 ///

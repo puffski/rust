@@ -8,35 +8,31 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// Do not remove on snapshot creation. Needed for bootstrap. (Issue #22364)
-#![cfg_attr(stage0, feature(custom_attribute))]
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 #![allow(dead_code)]
-#![allow(trivial_casts)]
 
 #![crate_name = "rustc_llvm"]
-#![unstable(feature = "rustc_private")]
-#![staged_api]
+#![unstable(feature = "rustc_private", issue = "27812")]
 #![crate_type = "dylib"]
 #![crate_type = "rlib"]
-#![doc(html_logo_url = "http://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
+#![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
-       html_root_url = "http://doc.rust-lang.org/nightly/")]
+       html_root_url = "https://doc.rust-lang.org/nightly/")]
+#![cfg_attr(not(stage0), deny(warnings))]
 
 #![feature(associated_consts)]
 #![feature(box_syntax)]
 #![feature(libc)]
 #![feature(link_args)]
 #![feature(staged_api)]
-#![feature(vec_push_all)]
+#![feature(linked_from)]
+#![feature(concat_idents)]
 
 extern crate libc;
 #[macro_use] #[no_link] extern crate rustc_bitflags;
 
-pub use self::OtherAttribute::*;
-pub use self::SpecialAttribute::*;
 pub use self::AttributeSet::*;
 pub use self::IntPredicate::*;
 pub use self::RealPredicate::*;
@@ -57,9 +53,9 @@ pub use self::DiagnosticSeverity::*;
 pub use self::Linkage::*;
 pub use self::DLLStorageClassTypes::*;
 
-use std::ffi::CString;
+use std::ffi::{CString, CStr};
 use std::cell::RefCell;
-use std::{slice, mem};
+use std::slice;
 use libc::{c_uint, c_ushort, uint64_t, c_int, size_t, c_char};
 use libc::{c_longlong, c_ulonglong, c_void};
 use debuginfo::{DIBuilderRef, DIDescriptor,
@@ -87,6 +83,7 @@ pub enum CallConv {
     X86StdcallCallConv = 64,
     X86FastcallCallConv = 65,
     X86_64_Win64 = 79,
+    X86_VectorCall = 80
 }
 
 #[derive(Copy, Clone)]
@@ -134,6 +131,7 @@ pub enum DLLStorageClassTypes {
 }
 
 bitflags! {
+    #[derive(Default, Debug)]
     flags Attribute : u64 {
         const ZExt            = 1 << 0,
         const SExt            = 1 << 1,
@@ -151,46 +149,88 @@ bitflags! {
         const OptimizeForSize = 1 << 13,
         const StackProtect    = 1 << 14,
         const StackProtectReq = 1 << 15,
-        const Alignment       = 1 << 16,
         const NoCapture       = 1 << 21,
         const NoRedZone       = 1 << 22,
         const NoImplicitFloat = 1 << 23,
         const Naked           = 1 << 24,
         const InlineHint      = 1 << 25,
-        const Stack           = 7 << 26,
         const ReturnsTwice    = 1 << 29,
         const UWTable         = 1 << 30,
         const NonLazyBind     = 1 << 31,
+
+        // Some of these are missing from the LLVM C API, the rest are
+        // present, but commented out, and preceded by the following warning:
+        // FIXME: These attributes are currently not included in the C API as
+        // a temporary measure until the API/ABI impact to the C API is understood
+        // and the path forward agreed upon.
+        const SanitizeAddress = 1 << 32,
+        const MinSize         = 1 << 33,
+        const NoDuplicate     = 1 << 34,
+        const StackProtectStrong = 1 << 35,
+        const SanitizeThread  = 1 << 36,
+        const SanitizeMemory  = 1 << 37,
+        const NoBuiltin       = 1 << 38,
+        const Returned        = 1 << 39,
+        const Cold            = 1 << 40,
+        const Builtin         = 1 << 41,
         const OptimizeNone    = 1 << 42,
+        const InAlloca        = 1 << 43,
+        const NonNull         = 1 << 44,
+        const JumpTable       = 1 << 45,
+        const Convergent      = 1 << 46,
+        const SafeStack       = 1 << 47,
+        const NoRecurse       = 1 << 48,
+        const InaccessibleMemOnly         = 1 << 49,
+        const InaccessibleMemOrArgMemOnly = 1 << 50,
     }
 }
 
-
-#[repr(u64)]
-#[derive(Copy, Clone)]
-pub enum OtherAttribute {
-    // The following are not really exposed in
-    // the LLVM C api so instead to add these
-    // we call a wrapper function in RustWrapper
-    // that uses the C++ api.
-    SanitizeAddressAttribute = 1 << 32,
-    MinSizeAttribute = 1 << 33,
-    NoDuplicateAttribute = 1 << 34,
-    StackProtectStrongAttribute = 1 << 35,
-    SanitizeThreadAttribute = 1 << 36,
-    SanitizeMemoryAttribute = 1 << 37,
-    NoBuiltinAttribute = 1 << 38,
-    ReturnedAttribute = 1 << 39,
-    ColdAttribute = 1 << 40,
-    BuiltinAttribute = 1 << 41,
-    OptimizeNoneAttribute = 1 << 42,
-    InAllocaAttribute = 1 << 43,
-    NonNullAttribute = 1 << 44,
+#[derive(Copy, Clone, Default, Debug)]
+pub struct Attributes {
+    regular: Attribute,
+    dereferenceable_bytes: u64
 }
 
-#[derive(Copy, Clone)]
-pub enum SpecialAttribute {
-    DereferenceableAttribute(u64)
+impl Attributes {
+    pub fn set(&mut self, attr: Attribute) -> &mut Self {
+        self.regular = self.regular | attr;
+        self
+    }
+
+    pub fn unset(&mut self, attr: Attribute) -> &mut Self {
+        self.regular = self.regular - attr;
+        self
+    }
+
+    pub fn set_dereferenceable(&mut self, bytes: u64) -> &mut Self {
+        self.dereferenceable_bytes = bytes;
+        self
+    }
+
+    pub fn unset_dereferenceable(&mut self) -> &mut Self {
+        self.dereferenceable_bytes = 0;
+        self
+    }
+
+    pub fn apply_llfn(&self, idx: usize, llfn: ValueRef) {
+        unsafe {
+            LLVMAddFunctionAttribute(llfn, idx as c_uint, self.regular.bits());
+            if self.dereferenceable_bytes != 0 {
+                LLVMAddDereferenceableAttr(llfn, idx as c_uint,
+                                           self.dereferenceable_bytes);
+            }
+        }
+    }
+
+    pub fn apply_callsite(&self, idx: usize, callsite: ValueRef) {
+        unsafe {
+            LLVMAddCallSiteAttribute(callsite, idx as c_uint, self.regular.bits());
+            if self.dereferenceable_bytes != 0 {
+                LLVMAddDereferenceableCallSiteAttr(callsite, idx as c_uint,
+                                                   self.dereferenceable_bytes);
+            }
+        }
+    }
 }
 
 #[repr(C)]
@@ -198,91 +238,6 @@ pub enum SpecialAttribute {
 pub enum AttributeSet {
     ReturnIndex = 0,
     FunctionIndex = !0
-}
-
-pub trait AttrHelper {
-    fn apply_llfn(&self, idx: c_uint, llfn: ValueRef);
-    fn apply_callsite(&self, idx: c_uint, callsite: ValueRef);
-}
-
-impl AttrHelper for Attribute {
-    fn apply_llfn(&self, idx: c_uint, llfn: ValueRef) {
-        unsafe {
-            LLVMAddFunctionAttribute(llfn, idx, self.bits() as uint64_t);
-        }
-    }
-
-    fn apply_callsite(&self, idx: c_uint, callsite: ValueRef) {
-        unsafe {
-            LLVMAddCallSiteAttribute(callsite, idx, self.bits() as uint64_t);
-        }
-    }
-}
-
-impl AttrHelper for OtherAttribute {
-    fn apply_llfn(&self, idx: c_uint, llfn: ValueRef) {
-        unsafe {
-            LLVMAddFunctionAttribute(llfn, idx, *self as uint64_t);
-        }
-    }
-
-    fn apply_callsite(&self, idx: c_uint, callsite: ValueRef) {
-        unsafe {
-            LLVMAddCallSiteAttribute(callsite, idx, *self as uint64_t);
-        }
-    }
-}
-
-impl AttrHelper for SpecialAttribute {
-    fn apply_llfn(&self, idx: c_uint, llfn: ValueRef) {
-        match *self {
-            DereferenceableAttribute(bytes) => unsafe {
-                LLVMAddDereferenceableAttr(llfn, idx, bytes as uint64_t);
-            }
-        }
-    }
-
-    fn apply_callsite(&self, idx: c_uint, callsite: ValueRef) {
-        match *self {
-            DereferenceableAttribute(bytes) => unsafe {
-                LLVMAddDereferenceableCallSiteAttr(callsite, idx, bytes as uint64_t);
-            }
-        }
-    }
-}
-
-pub struct AttrBuilder {
-    attrs: Vec<(usize, Box<AttrHelper+'static>)>
-}
-
-impl AttrBuilder {
-    pub fn new() -> AttrBuilder {
-        AttrBuilder {
-            attrs: Vec::new()
-        }
-    }
-
-    pub fn arg<'a, T: AttrHelper + 'static>(&'a mut self, idx: usize, a: T) -> &'a mut AttrBuilder {
-        self.attrs.push((idx, box a as Box<AttrHelper+'static>));
-        self
-    }
-
-    pub fn ret<'a, T: AttrHelper + 'static>(&'a mut self, a: T) -> &'a mut AttrBuilder {
-        self.attrs.push((ReturnIndex as usize, box a as Box<AttrHelper+'static>));
-        self
-    }
-
-    pub fn apply_llfn(&self, llfn: ValueRef) {
-        for &(idx, ref attr) in &self.attrs {
-            attr.apply_llfn(idx as c_uint, llfn);
-        }
-    }
-
-    pub fn apply_callsite(&self, callsite: ValueRef) {
-        for &(idx, ref attr) in &self.attrs {
-            attr.apply_callsite(idx as c_uint, callsite);
-        }
-    }
 }
 
 // enum for the LLVM IntPredicate type
@@ -462,6 +417,15 @@ pub enum ArchiveKind {
     K_COFF,
 }
 
+/// Represents the different LLVM passes Rust supports
+#[derive(Copy, Clone, PartialEq, Debug)]
+#[repr(C)]
+pub enum SupportedPassKind {
+    Function,
+    Module,
+    Unsupported,
+}
+
 // Opaque pointer types
 #[allow(missing_copy_implementations)]
 pub enum Module_opaque {}
@@ -535,6 +499,9 @@ pub type SMDiagnosticRef = *mut SMDiagnostic_opaque;
 #[allow(missing_copy_implementations)]
 pub enum RustArchiveMember_opaque {}
 pub type RustArchiveMemberRef = *mut RustArchiveMember_opaque;
+#[allow(missing_copy_implementations)]
+pub enum OperandBundleDef_opaque {}
+pub type OperandBundleDefRef = *mut OperandBundleDef_opaque;
 
 pub type DiagnosticHandler = unsafe extern "C" fn(DiagnosticInfoRef, *mut c_void);
 pub type InlineAsmDiagHandler = unsafe extern "C" fn(SMDiagnosticRef, *const c_void, c_uint);
@@ -598,6 +565,10 @@ pub mod debuginfo {
 // automatically updated whenever LLVM is updated to include an up-to-date
 // set of the libraries we need to link to LLVM for.
 #[link(name = "rustllvm", kind = "static")]
+#[cfg(not(cargobuild))]
+extern {}
+
+#[linked_from = "rustllvm"] // not quite true but good enough
 extern {
     /* Create and destroy contexts. */
     pub fn LLVMContextCreate() -> ContextRef;
@@ -612,6 +583,7 @@ extern {
                                              C: ContextRef)
                                              -> ModuleRef;
     pub fn LLVMGetModuleContext(M: ModuleRef) -> ContextRef;
+    pub fn LLVMCloneModule(M: ModuleRef) -> ModuleRef;
     pub fn LLVMDisposeModule(M: ModuleRef);
 
     /// Data layout. See Module::getDataLayout.
@@ -992,9 +964,10 @@ extern {
     pub fn LLVMAddFunctionAttrStringValue(Fn: ValueRef, index: c_uint,
                                           Name: *const c_char,
                                           Value: *const c_char);
+    pub fn LLVMRemoveFunctionAttributes(Fn: ValueRef, index: c_uint, attr: uint64_t);
     pub fn LLVMRemoveFunctionAttrString(Fn: ValueRef, index: c_uint, Name: *const c_char);
-    pub fn LLVMGetFunctionAttr(Fn: ValueRef) -> c_ulonglong;
-    pub fn LLVMRemoveFunctionAttr(Fn: ValueRef, val: c_ulonglong);
+    pub fn LLVMGetFunctionAttr(Fn: ValueRef) -> c_uint;
+    pub fn LLVMRemoveFunctionAttr(Fn: ValueRef, val: c_uint);
 
     /* Operations on parameters */
     pub fn LLVMCountParams(Fn: ValueRef) -> c_uint;
@@ -1138,14 +1111,15 @@ extern {
                                Addr: ValueRef,
                                NumDests: c_uint)
                                -> ValueRef;
-    pub fn LLVMBuildInvoke(B: BuilderRef,
-                           Fn: ValueRef,
-                           Args: *const ValueRef,
-                           NumArgs: c_uint,
-                           Then: BasicBlockRef,
-                           Catch: BasicBlockRef,
-                           Name: *const c_char)
-                           -> ValueRef;
+    pub fn LLVMRustBuildInvoke(B: BuilderRef,
+                               Fn: ValueRef,
+                               Args: *const ValueRef,
+                               NumArgs: c_uint,
+                               Then: BasicBlockRef,
+                               Catch: BasicBlockRef,
+                               Bundle: OperandBundleDefRef,
+                               Name: *const c_char)
+                               -> ValueRef;
     pub fn LLVMRustBuildLandingPad(B: BuilderRef,
                                    Ty: TypeRef,
                                    PersFn: ValueRef,
@@ -1155,6 +1129,31 @@ extern {
                                    -> ValueRef;
     pub fn LLVMBuildResume(B: BuilderRef, Exn: ValueRef) -> ValueRef;
     pub fn LLVMBuildUnreachable(B: BuilderRef) -> ValueRef;
+
+    pub fn LLVMRustBuildCleanupPad(B: BuilderRef,
+                                   ParentPad: ValueRef,
+                                   ArgCnt: c_uint,
+                                   Args: *const ValueRef,
+                                   Name: *const c_char) -> ValueRef;
+    pub fn LLVMRustBuildCleanupRet(B: BuilderRef,
+                                   CleanupPad: ValueRef,
+                                   UnwindBB: BasicBlockRef) -> ValueRef;
+    pub fn LLVMRustBuildCatchPad(B: BuilderRef,
+                                 ParentPad: ValueRef,
+                                 ArgCnt: c_uint,
+                                 Args: *const ValueRef,
+                                 Name: *const c_char) -> ValueRef;
+    pub fn LLVMRustBuildCatchRet(B: BuilderRef,
+                                 Pad: ValueRef,
+                                 BB: BasicBlockRef) -> ValueRef;
+    pub fn LLVMRustBuildCatchSwitch(Builder: BuilderRef,
+                                    ParentPad: ValueRef,
+                                    BB: BasicBlockRef,
+                                    NumHandlers: c_uint,
+                                    Name: *const c_char) -> ValueRef;
+    pub fn LLVMRustAddHandler(CatchSwitch: ValueRef,
+                              Handler: BasicBlockRef);
+    pub fn LLVMRustSetPersonalityFn(B: BuilderRef, Pers: ValueRef);
 
     /* Add a case to the switch instruction */
     pub fn LLVMAddCase(Switch: ValueRef,
@@ -1312,6 +1311,7 @@ extern {
                          -> ValueRef;
     pub fn LLVMBuildNot(B: BuilderRef, V: ValueRef, Name: *const c_char)
                         -> ValueRef;
+    pub fn LLVMRustSetHasUnsafeAlgebra(Instr: ValueRef);
 
     /* Memory */
     pub fn LLVMBuildAlloca(B: BuilderRef, Ty: TypeRef, Name: *const c_char)
@@ -1465,12 +1465,13 @@ extern {
     /* Miscellaneous instructions */
     pub fn LLVMBuildPhi(B: BuilderRef, Ty: TypeRef, Name: *const c_char)
                         -> ValueRef;
-    pub fn LLVMBuildCall(B: BuilderRef,
-                         Fn: ValueRef,
-                         Args: *const ValueRef,
-                         NumArgs: c_uint,
-                         Name: *const c_char)
-                         -> ValueRef;
+    pub fn LLVMRustBuildCall(B: BuilderRef,
+                             Fn: ValueRef,
+                             Args: *const ValueRef,
+                             NumArgs: c_uint,
+                             Bundle: OperandBundleDefRef,
+                             Name: *const c_char)
+                             -> ValueRef;
     pub fn LLVMBuildSelect(B: BuilderRef,
                            If: ValueRef,
                            Then: ValueRef,
@@ -1541,7 +1542,8 @@ extern {
                                   CMP: ValueRef,
                                   RHS: ValueRef,
                                   Order: AtomicOrdering,
-                                  FailureOrder: AtomicOrdering)
+                                  FailureOrder: AtomicOrdering,
+                                  Weak: Bool)
                                   -> ValueRef;
     pub fn LLVMBuildAtomicRMW(B: BuilderRef,
                               Op: AtomicBinOp,
@@ -2007,40 +2009,16 @@ extern {
     pub fn LLVMIsAAllocaInst(value_ref: ValueRef) -> ValueRef;
     pub fn LLVMIsAConstantInt(value_ref: ValueRef) -> ValueRef;
 
-    pub fn LLVMInitializeX86TargetInfo();
-    pub fn LLVMInitializeX86Target();
-    pub fn LLVMInitializeX86TargetMC();
-    pub fn LLVMInitializeX86AsmPrinter();
-    pub fn LLVMInitializeX86AsmParser();
-    pub fn LLVMInitializeARMTargetInfo();
-    pub fn LLVMInitializeARMTarget();
-    pub fn LLVMInitializeARMTargetMC();
-    pub fn LLVMInitializeARMAsmPrinter();
-    pub fn LLVMInitializeARMAsmParser();
-    pub fn LLVMInitializeAArch64TargetInfo();
-    pub fn LLVMInitializeAArch64Target();
-    pub fn LLVMInitializeAArch64TargetMC();
-    pub fn LLVMInitializeAArch64AsmPrinter();
-    pub fn LLVMInitializeAArch64AsmParser();
-    pub fn LLVMInitializeMipsTargetInfo();
-    pub fn LLVMInitializeMipsTarget();
-    pub fn LLVMInitializeMipsTargetMC();
-    pub fn LLVMInitializeMipsAsmPrinter();
-    pub fn LLVMInitializeMipsAsmParser();
-    pub fn LLVMInitializePowerPCTargetInfo();
-    pub fn LLVMInitializePowerPCTarget();
-    pub fn LLVMInitializePowerPCTargetMC();
-    pub fn LLVMInitializePowerPCAsmPrinter();
-    pub fn LLVMInitializePowerPCAsmParser();
+    pub fn LLVMRustPassKind(Pass: PassRef) -> SupportedPassKind;
+    pub fn LLVMRustFindAndCreatePass(Pass: *const c_char) -> PassRef;
+    pub fn LLVMRustAddPass(PM: PassManagerRef, Pass: PassRef);
 
-    pub fn LLVMRustAddPass(PM: PassManagerRef, Pass: *const c_char) -> bool;
     pub fn LLVMRustCreateTargetMachine(Triple: *const c_char,
                                        CPU: *const c_char,
                                        Features: *const c_char,
                                        Model: CodeGenModel,
                                        Reloc: RelocMode,
                                        Level: CodeGenOptLevel,
-                                       EnableSegstk: bool,
                                        UseSoftFP: bool,
                                        PositionIndependentExecutable: bool,
                                        FunctionSections: bool,
@@ -2139,6 +2117,17 @@ extern {
     pub fn LLVMRustSetDataLayoutFromTargetMachine(M: ModuleRef,
                                                   TM: TargetMachineRef);
     pub fn LLVMRustGetModuleDataLayout(M: ModuleRef) -> TargetDataRef;
+
+    pub fn LLVMRustBuildOperandBundleDef(Name: *const c_char,
+                                         Inputs: *const ValueRef,
+                                         NumInputs: c_uint)
+                                         -> OperandBundleDefRef;
+    pub fn LLVMRustFreeOperandBundleDef(Bundle: OperandBundleDefRef);
+
+    pub fn LLVMRustPositionBuilderAtStart(B: BuilderRef, BB: BasicBlockRef);
+
+    pub fn LLVMRustSetComdat(M: ModuleRef, V: ValueRef, Name: *const c_char);
+    pub fn LLVMRustUnsetComdat(V: ValueRef);
 }
 
 // LLVM requires symbols from this library, but apparently they're not printed
@@ -2160,6 +2149,24 @@ pub fn SetFunctionCallConv(fn_: ValueRef, cc: CallConv) {
 pub fn SetLinkage(global: ValueRef, link: Linkage) {
     unsafe {
         LLVMSetLinkage(global, link as c_uint);
+    }
+}
+
+// Externally visible symbols that might appear in multiple translation units need to appear in
+// their own comdat section so that the duplicates can be discarded at link time. This can for
+// example happen for generics when using multiple codegen units. This function simply uses the
+// value's name as the comdat value to make sure that it is in a 1-to-1 relationship to the
+// function.
+// For more details on COMDAT sections see e.g. http://www.airs.com/blog/archives/52
+pub fn SetUniqueComdat(llmod: ModuleRef, val: ValueRef) {
+    unsafe {
+        LLVMRustSetComdat(llmod, val, LLVMGetValueName(val));
+    }
+}
+
+pub fn UnsetComdat(val: ValueRef) {
+    unsafe {
+        LLVMRustUnsetComdat(val);
     }
 }
 
@@ -2196,6 +2203,13 @@ pub fn SetFunctionAttribute(fn_: ValueRef, attr: Attribute) {
     unsafe {
         LLVMAddFunctionAttribute(fn_, FunctionIndex as c_uint,
                                  attr.bits() as uint64_t)
+    }
+}
+
+pub fn RemoveFunctionAttributes(fn_: ValueRef, attr: Attribute) {
+    unsafe {
+        LLVMRemoveFunctionAttributes(fn_, FunctionIndex as c_uint,
+                                           attr.bits() as uint64_t)
     }
 }
 
@@ -2305,8 +2319,8 @@ pub unsafe extern "C" fn rust_llvm_string_write_impl(sr: RustStringRef,
                                                      size: size_t) {
     let slice = slice::from_raw_parts(ptr as *const u8, size as usize);
 
-    let sr: RustStringRepr = mem::transmute(sr);
-    (*sr).borrow_mut().push_all(slice);
+    let sr = sr as RustStringRepr;
+    (*sr).borrow_mut().extend_from_slice(slice);
 }
 
 pub fn build_string<F>(f: F) -> Option<String> where F: FnOnce(RustStringRef){
@@ -2325,11 +2339,107 @@ pub unsafe fn debug_loc_to_string(c: ContextRef, tr: DebugLocRef) -> String {
         .expect("got a non-UTF8 DebugLoc from LLVM")
 }
 
+pub fn initialize_available_targets() {
+    macro_rules! init_target(
+        ($cfg:meta, $($method:ident),*) => { {
+            #[cfg($cfg)]
+            fn init() {
+                extern {
+                    $(fn $method();)*
+                }
+                unsafe {
+                    $($method();)*
+                }
+            }
+            #[cfg(not($cfg))]
+            fn init() { }
+            init();
+        } }
+    );
+    init_target!(llvm_component = "x86",
+                 LLVMInitializeX86TargetInfo,
+                 LLVMInitializeX86Target,
+                 LLVMInitializeX86TargetMC,
+                 LLVMInitializeX86AsmPrinter,
+                 LLVMInitializeX86AsmParser);
+    init_target!(llvm_component = "arm",
+                 LLVMInitializeARMTargetInfo,
+                 LLVMInitializeARMTarget,
+                 LLVMInitializeARMTargetMC,
+                 LLVMInitializeARMAsmPrinter,
+                 LLVMInitializeARMAsmParser);
+    init_target!(llvm_component = "aarch64",
+                 LLVMInitializeAArch64TargetInfo,
+                 LLVMInitializeAArch64Target,
+                 LLVMInitializeAArch64TargetMC,
+                 LLVMInitializeAArch64AsmPrinter,
+                 LLVMInitializeAArch64AsmParser);
+    init_target!(llvm_component = "mips",
+                 LLVMInitializeMipsTargetInfo,
+                 LLVMInitializeMipsTarget,
+                 LLVMInitializeMipsTargetMC,
+                 LLVMInitializeMipsAsmPrinter,
+                 LLVMInitializeMipsAsmParser);
+    init_target!(llvm_component = "powerpc",
+                 LLVMInitializePowerPCTargetInfo,
+                 LLVMInitializePowerPCTarget,
+                 LLVMInitializePowerPCTargetMC,
+                 LLVMInitializePowerPCAsmPrinter,
+                 LLVMInitializePowerPCAsmParser);
+    init_target!(llvm_component = "pnacl",
+                 LLVMInitializePNaClTargetInfo,
+                 LLVMInitializePNaClTarget,
+                 LLVMInitializePNaClTargetMC);
+}
+
+pub fn last_error() -> Option<String> {
+    unsafe {
+        let cstr = LLVMRustGetLastError();
+        if cstr.is_null() {
+            None
+        } else {
+            let err = CStr::from_ptr(cstr).to_bytes();
+            let err = String::from_utf8_lossy(err).to_string();
+            libc::free(cstr as *mut _);
+            Some(err)
+        }
+    }
+}
+
+pub struct OperandBundleDef {
+    inner: OperandBundleDefRef,
+}
+
+impl OperandBundleDef {
+    pub fn new(name: &str, vals: &[ValueRef]) -> OperandBundleDef {
+        let name = CString::new(name).unwrap();
+        let def = unsafe {
+            LLVMRustBuildOperandBundleDef(name.as_ptr(),
+                                          vals.as_ptr(),
+                                          vals.len() as c_uint)
+        };
+        OperandBundleDef { inner: def }
+    }
+
+    pub fn raw(&self) -> OperandBundleDefRef {
+        self.inner
+    }
+}
+
+impl Drop for OperandBundleDef {
+    fn drop(&mut self) {
+        unsafe {
+            LLVMRustFreeOperandBundleDef(self.inner);
+        }
+    }
+}
+
 // The module containing the native LLVM dependencies, generated by the build system
 // Note that this must come after the rustllvm extern declaration so that
 // parts of LLVM that rustllvm depends on aren't thrown away by the linker.
 // Works to the above fix for #15460 to ensure LLVM dependencies that
 // are only used by rustllvm don't get stripped by the linker.
+#[cfg(not(cargobuild))]
 mod llvmdeps {
     include! { env!("CFG_LLVM_LINKAGE_FILE") }
 }

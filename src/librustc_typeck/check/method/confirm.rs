@@ -10,22 +10,24 @@
 
 use super::probe;
 
-use check::{self, FnCtxt, NoPreference, PreferMutLvalue, callee, demand};
+use check::{self, FnCtxt, callee, demand};
 use check::UnresolvedTypeAction;
-use middle::subst::{self};
-use middle::traits;
-use middle::ty::{self, Ty};
-use middle::ty_fold::TypeFoldable;
-use middle::infer;
-use middle::infer::InferCtxt;
-use syntax::ast;
+use middle::def_id::DefId;
+use rustc::ty::subst::{self};
+use rustc::traits;
+use rustc::ty::{self, NoPreference, PreferMutLvalue, Ty, TyCtxt};
+use rustc::ty::adjustment::{AdjustDerefRef, AutoDerefRef, AutoPtr};
+use rustc::ty::fold::TypeFoldable;
+use rustc::infer;
+use rustc::infer::{InferCtxt, TypeOrigin};
 use syntax::codemap::Span;
+use rustc_front::hir;
 
 struct ConfirmContext<'a, 'tcx:'a> {
     fcx: &'a FnCtxt<'a, 'tcx>,
     span: Span,
-    self_expr: &'tcx ast::Expr,
-    call_expr: &'tcx ast::Expr,
+    self_expr: &'tcx hir::Expr,
+    call_expr: &'tcx hir::Expr,
 }
 
 struct InstantiatedMethodSig<'tcx> {
@@ -44,8 +46,8 @@ struct InstantiatedMethodSig<'tcx> {
 
 pub fn confirm<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
                          span: Span,
-                         self_expr: &'tcx ast::Expr,
-                         call_expr: &'tcx ast::Expr,
+                         self_expr: &'tcx hir::Expr,
+                         call_expr: &'tcx hir::Expr,
                          unadjusted_self_ty: Ty<'tcx>,
                          pick: probe::Pick<'tcx>,
                          supplied_method_types: Vec<Ty<'tcx>>)
@@ -63,8 +65,8 @@ pub fn confirm<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
 impl<'a,'tcx> ConfirmContext<'a,'tcx> {
     fn new(fcx: &'a FnCtxt<'a, 'tcx>,
            span: Span,
-           self_expr: &'tcx ast::Expr,
-           call_expr: &'tcx ast::Expr)
+           self_expr: &'tcx hir::Expr,
+           call_expr: &'tcx hir::Expr)
            -> ConfirmContext<'a, 'tcx>
     {
         ConfirmContext { fcx: fcx, span: span, self_expr: self_expr, call_expr: call_expr }
@@ -96,27 +98,30 @@ impl<'a,'tcx> ConfirmContext<'a,'tcx> {
         let InstantiatedMethodSig {
             method_sig, all_substs, method_predicates
         } = self.instantiate_method_sig(&pick, all_substs);
+        let all_substs = self.tcx().mk_substs(all_substs);
         let method_self_ty = method_sig.inputs[0];
 
         // Unify the (adjusted) self type with what the method expects.
         self.unify_receivers(self_ty, method_self_ty);
 
-        // Add any trait/regions obligations specified on the method's type parameters.
-        self.add_obligations(&pick, &all_substs, &method_predicates);
-
-        // Create the final `MethodCallee`.
+        // Create the method type
+        let def_id = pick.item.def_id();
         let method_ty = pick.item.as_opt_method().unwrap();
-        let fty = self.tcx().mk_fn(None, self.tcx().mk_bare_fn(ty::BareFnTy {
+        let fty = self.tcx().mk_fn_def(def_id, all_substs, ty::BareFnTy {
             sig: ty::Binder(method_sig),
             unsafety: method_ty.fty.unsafety,
             abi: method_ty.fty.abi.clone(),
-        }));
-        let callee = ty::MethodCallee {
-            def_id: pick.item.def_id(),
-            ty: fty,
-            substs: self.tcx().mk_substs(all_substs)
-        };
+        });
 
+        // Add any trait/regions obligations specified on the method's type parameters.
+        self.add_obligations(fty, all_substs, &method_predicates);
+
+        // Create the final `MethodCallee`.
+        let callee = ty::MethodCallee {
+            def_id: def_id,
+            ty: fty,
+            substs: all_substs
+        };
         // If this is an `&mut self` method, bias the receiver
         // expression towards mutability (this will switch
         // e.g. `Deref` to `DerefMut` in overloaded derefs and so on).
@@ -135,7 +140,7 @@ impl<'a,'tcx> ConfirmContext<'a,'tcx> {
     {
         let (autoref, unsize) = if let Some(mutbl) = pick.autoref {
             let region = self.infcx().next_region_var(infer::Autoref(self.span));
-            let autoref = ty::AutoPtr(self.tcx().mk_region(region), mutbl);
+            let autoref = AutoPtr(self.tcx().mk_region(region), mutbl);
             (Some(autoref), pick.unsize.map(|target| {
                 target.adjust_for_autoref(self.tcx(), Some(autoref))
             }))
@@ -153,7 +158,7 @@ impl<'a,'tcx> ConfirmContext<'a,'tcx> {
         let (autoderefd_ty, n, result) = check::autoderef(self.fcx,
                                                           self.span,
                                                           unadjusted_self_ty,
-                                                          Some(self.self_expr),
+                                                          || Some(self.self_expr),
                                                           UnresolvedTypeAction::Error,
                                                           NoPreference,
                                                           |_, n| {
@@ -168,7 +173,7 @@ impl<'a,'tcx> ConfirmContext<'a,'tcx> {
 
         // Write out the final adjustment.
         self.fcx.write_adjustment(self.self_expr.id,
-                                  ty::AdjustDerefRef(ty::AutoDerefRef {
+                                  AdjustDerefRef(AutoDerefRef {
             autoderefs: pick.autoderefs,
             autoref: autoref,
             unsize: unsize
@@ -266,7 +271,7 @@ impl<'a,'tcx> ConfirmContext<'a,'tcx> {
             probe::WhereClausePick(ref poly_trait_ref) => {
                 // Where clauses can have bound regions in them. We need to instantiate
                 // those to convert from a poly-trait-ref to a trait-ref.
-                self.replace_late_bound_regions_with_fresh_var(&*poly_trait_ref).substs.clone()
+                self.replace_late_bound_regions_with_fresh_var(&poly_trait_ref).substs.clone()
             }
         }
     }
@@ -282,12 +287,12 @@ impl<'a,'tcx> ConfirmContext<'a,'tcx> {
         let (_, _, result) = check::autoderef(self.fcx,
                                               self.span,
                                               self_ty,
-                                              None,
+                                              || None,
                                               UnresolvedTypeAction::Error,
                                               NoPreference,
                                               |ty, _| {
             match ty.sty {
-                ty::TyTrait(ref data) => Some(closure(self, ty, &**data)),
+                ty::TyTrait(ref data) => Some(closure(self, ty, &data)),
                 _ => None,
             }
         });
@@ -295,10 +300,10 @@ impl<'a,'tcx> ConfirmContext<'a,'tcx> {
         match result {
             Some(r) => r,
             None => {
-                self.tcx().sess.span_bug(
+                span_bug!(
                     self.span,
-                    &format!("self-type `{}` for ObjectPick never dereferenced to an object",
-                            self_ty))
+                    "self-type `{}` for ObjectPick never dereferenced to an object",
+                    self_ty)
             }
         }
     }
@@ -329,7 +334,7 @@ impl<'a,'tcx> ConfirmContext<'a,'tcx> {
                     .generics.regions.get_slice(subst::FnSpace));
 
         let subst::Substs { types, regions } = substs;
-        let regions = regions.map(|r| r.with_vec(subst::FnSpace, method_regions));
+        let regions = regions.with_slice(subst::FnSpace, &method_regions);
         let mut final_substs = subst::Substs { types: types, regions: regions };
 
         if num_supplied_types == 0 {
@@ -348,7 +353,8 @@ impl<'a,'tcx> ConfirmContext<'a,'tcx> {
                 method_types);
         } else if num_supplied_types != num_method_types {
             span_err!(self.tcx().sess, self.span, E0036,
-                "incorrect number of type parameters given for this method");
+                "incorrect number of type parameters given for this method: expected {}, found {}",
+                num_method_types, num_supplied_types);
             final_substs.types.replace(
                 subst::FnSpace,
                 vec![self.tcx().types.err; num_method_types]);
@@ -363,13 +369,13 @@ impl<'a,'tcx> ConfirmContext<'a,'tcx> {
                        self_ty: Ty<'tcx>,
                        method_self_ty: Ty<'tcx>)
     {
-        match self.fcx.mk_subty(false, infer::Misc(self.span), self_ty, method_self_ty) {
+        match self.fcx.mk_subty(false, TypeOrigin::Misc(self.span), self_ty, method_self_ty) {
             Ok(_) => {}
             Err(_) => {
-                self.tcx().sess.span_bug(
+                span_bug!(
                     self.span,
-                    &format!("{} was a subtype of {} but now is not?",
-                             self_ty, method_self_ty));
+                    "{} was a subtype of {} but now is not?",
+                    self_ty, method_self_ty);
             }
         }
     }
@@ -420,11 +426,11 @@ impl<'a,'tcx> ConfirmContext<'a,'tcx> {
     }
 
     fn add_obligations(&mut self,
-                       pick: &probe::Pick<'tcx>,
+                       fty: Ty<'tcx>,
                        all_substs: &subst::Substs<'tcx>,
                        method_predicates: &ty::InstantiatedPredicates<'tcx>) {
-        debug!("add_obligations: pick={:?} all_substs={:?} method_predicates={:?}",
-               pick,
+        debug!("add_obligations: fty={:?} all_substs={:?} method_predicates={:?}",
+               fty,
                all_substs,
                method_predicates);
 
@@ -432,9 +438,16 @@ impl<'a,'tcx> ConfirmContext<'a,'tcx> {
             traits::ObligationCause::misc(self.span, self.fcx.body_id),
             method_predicates);
 
-        self.fcx.add_default_region_param_bounds(
+        // this is a projection from a trait reference, so we have to
+        // make sure that the trait reference inputs are well-formed.
+        self.fcx.add_wf_bounds(
             all_substs,
             self.call_expr);
+
+        // the function type must also be well-formed (this is not
+        // implied by the substs being well-formed because of inherent
+        // impls and late-bound regions - see issue #28609).
+        self.fcx.register_wf_obligation(fty, self.span, traits::MiscObligation);
     }
 
     ///////////////////////////////////////////////////////////////////////////
@@ -446,14 +459,14 @@ impl<'a,'tcx> ConfirmContext<'a,'tcx> {
     fn fixup_derefs_on_method_receiver_if_necessary(&self,
                                                     method_callee: &ty::MethodCallee) {
         let sig = match method_callee.ty.sty {
-            ty::TyBareFn(_, ref f) => f.sig.clone(),
+            ty::TyFnDef(_, _, ref f) => f.sig.clone(),
             _ => return,
         };
 
         match sig.0.inputs[0].sty {
             ty::TyRef(_, ty::TypeAndMut {
                 ty: _,
-                mutbl: ast::MutMutable,
+                mutbl: hir::MutMutable,
             }) => {}
             _ => return,
         }
@@ -464,11 +477,10 @@ impl<'a,'tcx> ConfirmContext<'a,'tcx> {
         loop {
             let last = exprs[exprs.len() - 1];
             match last.node {
-                ast::ExprParen(ref expr) |
-                ast::ExprField(ref expr, _) |
-                ast::ExprTupField(ref expr, _) |
-                ast::ExprIndex(ref expr, _) |
-                ast::ExprUnary(ast::UnDeref, ref expr) => exprs.push(&**expr),
+                hir::ExprField(ref expr, _) |
+                hir::ExprTupField(ref expr, _) |
+                hir::ExprIndex(ref expr, _) |
+                hir::ExprUnary(hir::UnDeref, ref expr) => exprs.push(&expr),
                 _ => break,
             }
         }
@@ -485,7 +497,7 @@ impl<'a,'tcx> ConfirmContext<'a,'tcx> {
                                             .borrow()
                                             .adjustments
                                             .get(&expr.id) {
-                Some(&ty::AdjustDerefRef(ref adj)) => adj.autoderefs,
+                Some(&AdjustDerefRef(ref adj)) => adj.autoderefs,
                 Some(_) | None => 0,
             };
 
@@ -497,7 +509,7 @@ impl<'a,'tcx> ConfirmContext<'a,'tcx> {
                 check::autoderef(self.fcx,
                                  expr.span,
                                  self.fcx.expr_ty(expr),
-                                 Some(expr),
+                                 || Some(expr),
                                  UnresolvedTypeAction::Error,
                                  PreferMutLvalue,
                                  |_, autoderefs| {
@@ -510,92 +522,94 @@ impl<'a,'tcx> ConfirmContext<'a,'tcx> {
             }
 
             // Don't retry the first one or we might infinite loop!
-            if i != 0 {
-                match expr.node {
-                    ast::ExprIndex(ref base_expr, ref index_expr) => {
-                        // If this is an overloaded index, the
-                        // adjustment will include an extra layer of
-                        // autoref because the method is an &self/&mut
-                        // self method. We have to peel it off to get
-                        // the raw adjustment that `try_index_step`
-                        // expects. This is annoying and horrible. We
-                        // ought to recode this routine so it doesn't
-                        // (ab)use the normal type checking paths.
-                        let adj = self.fcx.inh.tables.borrow().adjustments.get(&base_expr.id)
-                                                                          .cloned();
-                        let (autoderefs, unsize) = match adj {
-                            Some(ty::AdjustDerefRef(adr)) => match adr.autoref {
-                                None => {
-                                    assert!(adr.unsize.is_none());
-                                    (adr.autoderefs, None)
-                                }
-                                Some(ty::AutoPtr(_, _)) => {
-                                    (adr.autoderefs, adr.unsize.map(|target| {
-                                        target.builtin_deref(false)
-                                              .expect("fixup: AutoPtr is not &T").ty
-                                    }))
-                                }
-                                Some(_) => {
-                                    self.tcx().sess.span_bug(
-                                        base_expr.span,
-                                        &format!("unexpected adjustment autoref {:?}",
-                                                adr));
-                                }
-                            },
-                            None => (0, None),
-                            Some(_) => {
-                                self.tcx().sess.span_bug(
-                                    base_expr.span,
-                                    "unexpected adjustment type");
+            if i == 0 {
+                continue;
+            }
+            match expr.node {
+                hir::ExprIndex(ref base_expr, ref index_expr) => {
+                    // If this is an overloaded index, the
+                    // adjustment will include an extra layer of
+                    // autoref because the method is an &self/&mut
+                    // self method. We have to peel it off to get
+                    // the raw adjustment that `try_index_step`
+                    // expects. This is annoying and horrible. We
+                    // ought to recode this routine so it doesn't
+                    // (ab)use the normal type checking paths.
+                    let adj = self.fcx.inh.tables.borrow().adjustments.get(&base_expr.id)
+                                                                        .cloned();
+                    let (autoderefs, unsize) = match adj {
+                        Some(AdjustDerefRef(adr)) => match adr.autoref {
+                            None => {
+                                assert!(adr.unsize.is_none());
+                                (adr.autoderefs, None)
                             }
-                        };
-
-                        let (adjusted_base_ty, unsize) = if let Some(target) = unsize {
-                            (target, true)
-                        } else {
-                            (self.fcx.adjust_expr_ty(base_expr,
-                                Some(&ty::AdjustDerefRef(ty::AutoDerefRef {
-                                    autoderefs: autoderefs,
-                                    autoref: None,
-                                    unsize: None
-                                }))), false)
-                        };
-                        let index_expr_ty = self.fcx.expr_ty(&**index_expr);
-
-                        let result = check::try_index_step(
-                            self.fcx,
-                            ty::MethodCall::expr(expr.id),
-                            expr,
-                            &**base_expr,
-                            adjusted_base_ty,
-                            autoderefs,
-                            unsize,
-                            PreferMutLvalue,
-                            index_expr_ty);
-
-                        if let Some((input_ty, return_ty)) = result {
-                            demand::suptype(self.fcx, index_expr.span, input_ty, index_expr_ty);
-
-                            let expr_ty = self.fcx.expr_ty(&*expr);
-                            demand::suptype(self.fcx, expr.span, expr_ty, return_ty);
+                            Some(AutoPtr(_, _)) => {
+                                (adr.autoderefs, adr.unsize.map(|target| {
+                                    target.builtin_deref(false, NoPreference)
+                                            .expect("fixup: AutoPtr is not &T").ty
+                                }))
+                            }
+                            Some(_) => {
+                                span_bug!(
+                                    base_expr.span,
+                                    "unexpected adjustment autoref {:?}",
+                                    adr);
+                            }
+                        },
+                        None => (0, None),
+                        Some(_) => {
+                            span_bug!(
+                                base_expr.span,
+                                "unexpected adjustment type");
                         }
+                    };
+
+                    let (adjusted_base_ty, unsize) = if let Some(target) = unsize {
+                        (target, true)
+                    } else {
+                        (self.fcx.adjust_expr_ty(base_expr,
+                            Some(&AdjustDerefRef(AutoDerefRef {
+                                autoderefs: autoderefs,
+                                autoref: None,
+                                unsize: None
+                            }))), false)
+                    };
+                    let index_expr_ty = self.fcx.expr_ty(&index_expr);
+
+                    let result = check::try_index_step(
+                        self.fcx,
+                        ty::MethodCall::expr(expr.id),
+                        expr,
+                        &base_expr,
+                        adjusted_base_ty,
+                        autoderefs,
+                        unsize,
+                        PreferMutLvalue,
+                        index_expr_ty);
+
+                    if let Some((input_ty, return_ty)) = result {
+                        demand::suptype(self.fcx, index_expr.span, input_ty, index_expr_ty);
+
+                        let expr_ty = self.fcx.expr_ty(&expr);
+                        demand::suptype(self.fcx, expr.span, expr_ty, return_ty);
                     }
-                    ast::ExprUnary(ast::UnDeref, ref base_expr) => {
-                        // if this is an overloaded deref, then re-evaluate with
-                        // a preference for mut
-                        let method_call = ty::MethodCall::expr(expr.id);
-                        if self.fcx.inh.tables.borrow().method_map.contains_key(&method_call) {
-                            check::try_overloaded_deref(
-                                self.fcx,
-                                expr.span,
-                                Some(method_call),
-                                Some(&**base_expr),
-                                self.fcx.expr_ty(&**base_expr),
-                                PreferMutLvalue);
-                        }
-                    }
-                    _ => {}
                 }
+                hir::ExprUnary(hir::UnDeref, ref base_expr) => {
+                    // if this is an overloaded deref, then re-evaluate with
+                    // a preference for mut
+                    let method_call = ty::MethodCall::expr(expr.id);
+                    if self.fcx.inh.tables.borrow().method_map.contains_key(&method_call) {
+                        let method = check::try_overloaded_deref(
+                            self.fcx,
+                            expr.span,
+                            Some(&base_expr),
+                            self.fcx.expr_ty(&base_expr),
+                            PreferMutLvalue);
+                        let method = method.expect("re-trying deref failed");
+                        self.fcx.inh.tables.borrow_mut().method_map.insert(method_call, method);
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -603,7 +617,7 @@ impl<'a,'tcx> ConfirmContext<'a,'tcx> {
     ///////////////////////////////////////////////////////////////////////////
     // MISCELLANY
 
-    fn tcx(&self) -> &'a ty::ctxt<'tcx> {
+    fn tcx(&self) -> &'a TyCtxt<'tcx> {
         self.fcx.tcx()
     }
 
@@ -617,19 +631,13 @@ impl<'a,'tcx> ConfirmContext<'a,'tcx> {
             ty::TraitContainer(trait_def_id) => {
                 callee::check_legal_trait_for_method_call(self.fcx.ccx, self.span, trait_def_id)
             }
-            ty::ImplContainer(..) => {
-                // Since `drop` is a trait method, we expect that any
-                // potential calls to it will wind up in the other
-                // arm. But just to be sure, check that the method id
-                // does not appear in the list of destructors.
-                assert!(!self.tcx().destructors.borrow().contains(&pick.item.def_id()));
-            }
+            ty::ImplContainer(..) => {}
         }
     }
 
     fn upcast(&mut self,
               source_trait_ref: ty::PolyTraitRef<'tcx>,
-              target_trait_def_id: ast::DefId)
+              target_trait_def_id: DefId)
               -> ty::PolyTraitRef<'tcx>
     {
         let upcast_trait_refs = traits::upcast(self.tcx(),
@@ -638,12 +646,12 @@ impl<'a,'tcx> ConfirmContext<'a,'tcx> {
 
         // must be exactly one trait ref or we'd get an ambig error etc
         if upcast_trait_refs.len() != 1 {
-            self.tcx().sess.span_bug(
+            span_bug!(
                 self.span,
-                &format!("cannot uniquely upcast `{:?}` to `{:?}`: `{:?}`",
-                         source_trait_ref,
-                         target_trait_def_id,
-                         upcast_trait_refs));
+                "cannot uniquely upcast `{:?}` to `{:?}`: `{:?}`",
+                source_trait_ref,
+                target_trait_def_id,
+                upcast_trait_refs);
         }
 
         upcast_trait_refs.into_iter().next().unwrap()

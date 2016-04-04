@@ -7,18 +7,18 @@
 // <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
-#![feature(no_std)]
-#![no_std]
+#![feature(no_core)]
+#![no_core]
 
 // This tests that conflicting imports shows both `use` lines
 // when reporting the error.
 
 mod sub1 {
-    fn foo() {} // implementation 1
+    pub fn foo() {} // implementation 1
 }
 
 mod sub2 {
-    fn foo() {} // implementation 2
+    pub fn foo() {} // implementation 2
 }
 
 use sub1::foo; //~ NOTE previous import of `foo` here

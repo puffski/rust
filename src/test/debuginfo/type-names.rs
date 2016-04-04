@@ -175,13 +175,14 @@
 
 #![feature(box_syntax)]
 #![allow(unused_variables)]
+#![feature(omit_gdb_pretty_printer_section)]
 #![omit_gdb_pretty_printer_section]
 
 use self::Enum1::{Variant1, Variant2};
 use std::marker::PhantomData;
 use std::ptr;
 
-struct Struct1;
+pub struct Struct1;
 struct GenericStruct<T1, T2>(PhantomData<(T1,T2)>);
 
 enum Enum1 {

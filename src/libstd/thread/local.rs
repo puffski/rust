@@ -10,15 +10,10 @@
 
 //! Thread local storage
 
-#![unstable(feature = "thread_local_internals")]
-
-use prelude::v1::*;
+#![unstable(feature = "thread_local_internals", issue = "0")]
 
 use cell::UnsafeCell;
-
-// Sure wish we had macro hygiene, no?
-#[doc(hidden)]
-pub use self::imp::Key as __KeyInner;
+use mem;
 
 /// A thread local storage key which owns its contents.
 ///
@@ -61,41 +56,47 @@ pub use self::imp::Key as __KeyInner;
 ///     assert_eq!(*f.borrow(), 2);
 /// });
 /// ```
+///
+/// # Platform-specific behavior
+///
+/// Note that a "best effort" is made to ensure that destructors for types
+/// stored in thread local storage are run, but not all platforms can gurantee
+/// that destructors will be run for all types in thread local storage. For
+/// example, there are a number of known caveats where destructors are not run:
+///
+/// 1. On Unix systems when pthread-based TLS is being used, destructors will
+///    not be run for TLS values on the main thread when it exits. Note that the
+///    application will exit immediately after the main thread exits as well.
+/// 2. On all platforms it's possible for TLS to re-initialize other TLS slots
+///    during destruction. Some platforms ensure that this cannot happen
+///    infinitely by preventing re-initialization of any slot that has been
+///    destroyed, but not all platforms have this guard. Those platforms that do
+///    not guard typically have a synthetic limit after which point no more
+///    destructors are run.
+/// 3. On OSX, initializing TLS during destruction of other TLS slots can
+///    sometimes cancel *all* destructors for the current thread, whether or not
+///    the slots have already had their destructors run or not.
 #[stable(feature = "rust1", since = "1.0.0")]
-pub struct LocalKey<T> {
-    // The key itself may be tagged with #[thread_local], and this `Key` is
-    // stored as a `static`, and it's not valid for a static to reference the
-    // address of another thread_local static. For this reason we kinda wonkily
-    // work around this by generating a shim function which will give us the
-    // address of the inner TLS key at runtime.
+pub struct LocalKey<T: 'static> {
+    // This outer `LocalKey<T>` type is what's going to be stored in statics,
+    // but actual data inside will sometimes be tagged with #[thread_local].
+    // It's not valid for a true static to reference a #[thread_local] static,
+    // so we get around that by exposing an accessor through a layer of function
+    // indirection (this thunk).
     //
-    // This is trivially devirtualizable by LLVM because we never store anything
-    // to this field and rustc can declare the `static` as constant as well.
-    inner: fn() -> &'static __KeyInner<T>,
+    // Note that the thunk is itself unsafe because the returned lifetime of the
+    // slot where data lives, `'static`, is not actually valid. The lifetime
+    // here is actually `'thread`!
+    //
+    // Although this is an extra layer of indirection, it should in theory be
+    // trivially devirtualizable by LLVM because the value of `inner` never
+    // changes and the constant should be readonly within a crate. This mainly
+    // only runs into problems when TLS statics are exported across crates.
+    inner: fn() -> Option<&'static UnsafeCell<Option<T>>>,
 
     // initialization routine to invoke to create a value
     init: fn() -> T,
 }
-
-// Macro pain #4586:
-//
-// When cross compiling, rustc will load plugins and macros from the *host*
-// platform before search for macros from the target platform. This is primarily
-// done to detect, for example, plugins. Ideally the macro below would be
-// defined once per module below, but unfortunately this means we have the
-// following situation:
-//
-// 1. We compile libstd for x86_64-unknown-linux-gnu, this thread_local!() macro
-//    will inject #[thread_local] statics.
-// 2. We then try to compile a program for arm-linux-androideabi
-// 3. The compiler has a host of linux and a target of android, so it loads
-//    macros from the *linux* libstd.
-// 4. The macro generates a #[thread_local] field, but the android libstd does
-//    not use #[thread_local]
-// 5. Compile error about structs with wrong fields.
-//
-// To get around this, we're forced to inject the #[cfg] logic into the macro
-// itself. Woohoo.
 
 /// Declare a new thread local storage key of type `std::thread::LocalKey`.
 ///
@@ -104,58 +105,51 @@ pub struct LocalKey<T> {
 #[macro_export]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[allow_internal_unstable]
-#[cfg(not(no_elf_tls))]
 macro_rules! thread_local {
     (static $name:ident: $t:ty = $init:expr) => (
-        static $name: ::std::thread::LocalKey<$t> =
-            __thread_local_inner!($t, $init,
-                #[cfg_attr(all(any(target_os = "macos", target_os = "linux"),
-                               not(target_arch = "aarch64")),
-                           thread_local)]);
+        static $name: $crate::thread::LocalKey<$t> =
+            __thread_local_inner!($t, $init);
     );
     (pub static $name:ident: $t:ty = $init:expr) => (
-        pub static $name: ::std::thread::LocalKey<$t> =
-            __thread_local_inner!($t, $init,
-                #[cfg_attr(all(any(target_os = "macos", target_os = "linux"),
-                               not(target_arch = "aarch64")),
-                           thread_local)]);
-    );
-}
-
-#[macro_export]
-#[stable(feature = "rust1", since = "1.0.0")]
-#[allow_internal_unstable]
-#[cfg(no_elf_tls)]
-macro_rules! thread_local {
-    (static $name:ident: $t:ty = $init:expr) => (
-        static $name: ::std::thread::LocalKey<$t> =
-            __thread_local_inner!($t, $init, #[]);
-    );
-    (pub static $name:ident: $t:ty = $init:expr) => (
-        pub static $name: ::std::thread::LocalKey<$t> =
-            __thread_local_inner!($t, $init, #[]);
+        pub static $name: $crate::thread::LocalKey<$t> =
+            __thread_local_inner!($t, $init);
     );
 }
 
 #[doc(hidden)]
 #[unstable(feature = "thread_local_internals",
-           reason = "should not be necessary")]
+           reason = "should not be necessary",
+           issue = "0")]
 #[macro_export]
 #[allow_internal_unstable]
 macro_rules! __thread_local_inner {
-    ($t:ty, $init:expr, #[$($attr:meta),*]) => {{
-        $(#[$attr])*
-        static __KEY: ::std::thread::__LocalKeyInner<$t> =
-            ::std::thread::__LocalKeyInner::new();
+    ($t:ty, $init:expr) => {{
         fn __init() -> $t { $init }
-        fn __getit() -> &'static ::std::thread::__LocalKeyInner<$t> { &__KEY }
-        ::std::thread::LocalKey::new(__getit, __init)
+
+        fn __getit() -> $crate::option::Option<
+            &'static $crate::cell::UnsafeCell<
+                $crate::option::Option<$t>>>
+        {
+            #[thread_local]
+            #[cfg(target_thread_local)]
+            static __KEY: $crate::thread::__ElfLocalKeyInner<$t> =
+                $crate::thread::__ElfLocalKeyInner::new();
+
+            #[cfg(not(target_thread_local))]
+            static __KEY: $crate::thread::__OsLocalKeyInner<$t> =
+                $crate::thread::__OsLocalKeyInner::new();
+
+            __KEY.get()
+        }
+
+        $crate::thread::LocalKey::new(__getit, __init)
     }}
 }
 
 /// Indicator of the state of a thread local storage key.
 #[unstable(feature = "thread_local_state",
-           reason = "state querying was recently added")]
+           reason = "state querying was recently added",
+           issue = "27716")]
 #[derive(Eq, PartialEq, Copy, Clone)]
 pub enum LocalKeyState {
     /// All keys are in this state whenever a thread starts. Keys will
@@ -187,12 +181,13 @@ pub enum LocalKeyState {
 impl<T: 'static> LocalKey<T> {
     #[doc(hidden)]
     #[unstable(feature = "thread_local_internals",
-               reason = "recently added to create a key")]
-    pub const fn new(inner: fn() -> &'static __KeyInner<T>,
+               reason = "recently added to create a key",
+               issue = "0")]
+    pub const fn new(inner: fn() -> Option<&'static UnsafeCell<Option<T>>>,
                      init: fn() -> T) -> LocalKey<T> {
         LocalKey {
             inner: inner,
-            init: init
+            init: init,
         }
     }
 
@@ -209,10 +204,10 @@ impl<T: 'static> LocalKey<T> {
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn with<F, R>(&'static self, f: F) -> R
                       where F: FnOnce(&T) -> R {
-        let slot = (self.inner)();
         unsafe {
-            let slot = slot.get().expect("cannot access a TLS value during or \
-                                          after it is destroyed");
+            let slot = (self.inner)();
+            let slot = slot.expect("cannot access a TLS value during or \
+                                    after it is destroyed");
             f(match *slot.get() {
                 Some(ref inner) => inner,
                 None => self.init(slot),
@@ -225,7 +220,21 @@ impl<T: 'static> LocalKey<T> {
         // just in case initialization fails.
         let value = (self.init)();
         let ptr = slot.get();
-        *ptr = Some(value);
+
+        // note that this can in theory just be `*ptr = Some(value)`, but due to
+        // the compiler will currently codegen that pattern with something like:
+        //
+        //      ptr::drop_in_place(ptr)
+        //      ptr::write(ptr, Some(value))
+        //
+        // Due to this pattern it's possible for the destructor of the value in
+        // `ptr` (e.g. if this is being recursively initialized) to re-access
+        // TLS, in which case there will be a `&` and `&mut` pointer to the same
+        // value (an aliasing violation). To avoid setting the "I'm running a
+        // destructor" flag we just use `mem::replace` which should sequence the
+        // operations a little differently and make this safe to call.
+        mem::replace(&mut *ptr, Some(value));
+
         (*ptr).as_ref().unwrap()
     }
 
@@ -250,10 +259,11 @@ impl<T: 'static> LocalKey<T> {
     /// to be able to be accessed. Keys in the `Destroyed` state will panic on
     /// any call to `with`.
     #[unstable(feature = "thread_local_state",
-               reason = "state querying was recently added")]
+               reason = "state querying was recently added",
+               issue = "27716")]
     pub fn state(&'static self) -> LocalKeyState {
         unsafe {
-            match (self.inner)().get() {
+            match (self.inner)() {
                 Some(cell) => {
                     match *cell.get() {
                         Some(..) => LocalKeyState::Valid,
@@ -266,13 +276,9 @@ impl<T: 'static> LocalKey<T> {
     }
 }
 
-#[cfg(all(any(target_os = "macos", target_os = "linux"),
-          not(target_arch = "aarch64"),
-          not(no_elf_tls)))]
+#[cfg(target_thread_local)]
 #[doc(hidden)]
-mod imp {
-    use prelude::v1::*;
-
+pub mod elf {
     use cell::{Cell, UnsafeCell};
     use intrinsics;
     use ptr;
@@ -297,11 +303,13 @@ mod imp {
             }
         }
 
-        pub unsafe fn get(&'static self) -> Option<&'static UnsafeCell<Option<T>>> {
-            if intrinsics::needs_drop::<T>() && self.dtor_running.get() {
-                return None
+        pub fn get(&'static self) -> Option<&'static UnsafeCell<Option<T>>> {
+            unsafe {
+                if intrinsics::needs_drop::<T>() && self.dtor_running.get() {
+                    return None
+                }
+                self.register_dtor();
             }
-            self.register_dtor();
             Some(&self.inner)
         }
 
@@ -327,6 +335,7 @@ mod imp {
     // Due to rust-lang/rust#18804, make sure this is not generic!
     #[cfg(target_os = "linux")]
     unsafe fn register_dtor(t: *mut u8, dtor: unsafe extern fn(*mut u8)) {
+        use prelude::v1::*;
         use mem;
         use libc;
         use sys_common::thread_local as os;
@@ -410,16 +419,13 @@ mod imp {
         if cfg!(target_os = "macos") {
             ptr::read((*ptr).inner.get());
         } else {
-            intrinsics::drop_in_place((*ptr).inner.get());
+            ptr::drop_in_place((*ptr).inner.get());
         }
     }
 }
 
-#[cfg(any(not(any(target_os = "macos", target_os = "linux")),
-          target_arch = "aarch64",
-          no_elf_tls))]
 #[doc(hidden)]
-mod imp {
+pub mod os {
     use prelude::v1::*;
 
     use cell::{Cell, UnsafeCell};
@@ -448,24 +454,26 @@ mod imp {
             }
         }
 
-        pub unsafe fn get(&'static self) -> Option<&'static UnsafeCell<Option<T>>> {
-            let ptr = self.os.get() as *mut Value<T>;
-            if !ptr.is_null() {
-                if ptr as usize == 1 {
-                    return None
+        pub fn get(&'static self) -> Option<&'static UnsafeCell<Option<T>>> {
+            unsafe {
+                let ptr = self.os.get() as *mut Value<T>;
+                if !ptr.is_null() {
+                    if ptr as usize == 1 {
+                        return None
+                    }
+                    return Some(&(*ptr).value);
                 }
-                return Some(&(*ptr).value);
-            }
 
-            // If the lookup returned null, we haven't initialized our own local
-            // copy, so do that now.
-            let ptr: Box<Value<T>> = box Value {
-                key: self,
-                value: UnsafeCell::new(None),
-            };
-            let ptr = Box::into_raw(ptr);
-            self.os.set(ptr as *mut u8);
-            Some(&(*ptr).value)
+                // If the lookup returned null, we haven't initialized our own local
+                // copy, so do that now.
+                let ptr: Box<Value<T>> = box Value {
+                    key: self,
+                    value: UnsafeCell::new(None),
+                };
+                let ptr = Box::into_raw(ptr);
+                self.os.set(ptr as *mut u8);
+                Some(&(*ptr).value)
+            }
         }
     }
 
@@ -618,7 +626,12 @@ mod tests {
         }).join().ok().unwrap();
     }
 
+    // Note that this test will deadlock if TLS destructors aren't run (this
+    // requires the destructor to be run to pass the test). OSX has a known bug
+    // where dtors-in-dtors may cancel other destructors, so we just ignore this
+    // test on OSX.
     #[test]
+    #[cfg_attr(target_os = "macos", ignore)]
     fn dtors_in_dtors_in_dtors() {
         struct S1(Sender<()>);
         thread_local!(static K1: UnsafeCell<Option<S1>> = UnsafeCell::new(None));

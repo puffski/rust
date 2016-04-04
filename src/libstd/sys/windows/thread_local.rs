@@ -10,13 +10,12 @@
 
 use prelude::v1::*;
 
-use libc::types::os::arch::extra::{DWORD, LPVOID, BOOL};
-
 use ptr;
-use rt;
+use sys::c;
 use sys_common::mutex::Mutex;
+use sys_common;
 
-pub type Key = DWORD;
+pub type Key = c::DWORD;
 pub type Dtor = unsafe extern fn(*mut u8);
 
 // Turns out, like pretty much everything, Windows is pretty close the
@@ -58,7 +57,7 @@ pub type Dtor = unsafe extern fn(*mut u8);
 // the thread infrastructure to be in place (useful on the borders of
 // initialization/destruction).
 static DTOR_LOCK: Mutex = Mutex::new();
-static mut DTORS: *mut Vec<(Key, Dtor)> = 0 as *mut _;
+static mut DTORS: *mut Vec<(Key, Dtor)> = ptr::null_mut();
 
 // -------------------------------------------------------------------------
 // Native bindings
@@ -68,25 +67,23 @@ static mut DTORS: *mut Vec<(Key, Dtor)> = 0 as *mut _;
 
 #[inline]
 pub unsafe fn create(dtor: Option<Dtor>) -> Key {
-    const TLS_OUT_OF_INDEXES: DWORD = 0xFFFFFFFF;
-    let key = TlsAlloc();
-    assert!(key != TLS_OUT_OF_INDEXES);
-    match dtor {
-        Some(f) => register_dtor(key, f),
-        None => {}
+    let key = c::TlsAlloc();
+    assert!(key != c::TLS_OUT_OF_INDEXES);
+    if let Some(f) = dtor {
+        register_dtor(key, f);
     }
     return key;
 }
 
 #[inline]
 pub unsafe fn set(key: Key, value: *mut u8) {
-    let r = TlsSetValue(key, value as LPVOID);
+    let r = c::TlsSetValue(key, value as c::LPVOID);
     debug_assert!(r != 0);
 }
 
 #[inline]
 pub unsafe fn get(key: Key) -> *mut u8 {
-    TlsGetValue(key) as *mut u8
+    c::TlsGetValue(key) as *mut u8
 }
 
 #[inline]
@@ -107,16 +104,9 @@ pub unsafe fn destroy(key: Key) {
         // Note that source [2] above shows precedent for this sort
         // of strategy.
     } else {
-        let r = TlsFree(key);
+        let r = c::TlsFree(key);
         debug_assert!(r != 0);
     }
-}
-
-extern "system" {
-    fn TlsAlloc() -> DWORD;
-    fn TlsFree(dwTlsIndex: DWORD) -> BOOL;
-    fn TlsGetValue(dwTlsIndex: DWORD) -> LPVOID;
-    fn TlsSetValue(dwTlsIndex: DWORD, lpTlsvalue: LPVOID) -> BOOL;
 }
 
 // -------------------------------------------------------------------------
@@ -133,7 +123,7 @@ unsafe fn init_dtors() {
 
     let dtors = box Vec::<(Key, Dtor)>::new();
 
-    let res = rt::at_exit(move|| {
+    let res = sys_common::at_exit(move|| {
         DTOR_LOCK.lock();
         let dtors = DTORS;
         DTORS = 1 as *mut _;
@@ -221,32 +211,50 @@ unsafe fn unregister_dtor(key: Key) -> bool {
 //
 // # The article mentions crazy stuff about "/INCLUDE"?
 //
-// It sure does! We include it below for MSVC targets, but it look like for GNU
-// targets we don't require it.
+// It sure does! Specifically we're talking about this quote:
+//
+//      The Microsoft run-time library facilitates this process by defining a
+//      memory image of the TLS Directory and giving it the special name
+//      “__tls_used” (Intel x86 platforms) or “_tls_used” (other platforms). The
+//      linker looks for this memory image and uses the data there to create the
+//      TLS Directory. Other compilers that support TLS and work with the
+//      Microsoft linker must use this same technique.
+//
+// Basically what this means is that if we want support for our TLS
+// destructors/our hook being called then we need to make sure the linker does
+// not omit this symbol. Otherwise it will omit it and our callback won't be
+// wired up.
+//
+// We don't actually use the `/INCLUDE` linker flag here like the article
+// mentions because the Rust compiler doesn't propagate linker flags, but
+// instead we use a shim function which performs a volatile 1-byte load from
+// the address of the symbol to ensure it sticks around.
 
 #[link_section = ".CRT$XLB"]
 #[linkage = "external"]
-#[allow(warnings)]
-pub static p_thread_callback: unsafe extern "system" fn(LPVOID, DWORD,
-                                                        LPVOID) =
+#[allow(dead_code, unused_variables)]
+pub static p_thread_callback: unsafe extern "system" fn(c::LPVOID, c::DWORD,
+                                                        c::LPVOID) =
         on_tls_callback;
 
-#[cfg(all(target_env = "msvc", target_pointer_width = "64"))]
-#[link_args = "/INCLUDE:_tls_used"]
-extern {}
-#[cfg(all(target_env = "msvc", target_pointer_width = "32"))]
-#[link_args = "/INCLUDE:__tls_used"]
-extern {}
-
-#[allow(warnings)]
-unsafe extern "system" fn on_tls_callback(h: LPVOID,
-                                          dwReason: DWORD,
-                                          pv: LPVOID) {
-    const DLL_THREAD_DETACH: DWORD = 3;
-    const DLL_PROCESS_DETACH: DWORD = 0;
-    if dwReason == DLL_THREAD_DETACH || dwReason == DLL_PROCESS_DETACH {
+#[allow(dead_code, unused_variables)]
+unsafe extern "system" fn on_tls_callback(h: c::LPVOID,
+                                          dwReason: c::DWORD,
+                                          pv: c::LPVOID) {
+    if dwReason == c::DLL_THREAD_DETACH || dwReason == c::DLL_PROCESS_DETACH {
         run_dtors();
     }
+
+    // See comments above for what this is doing. Note that we don't need this
+    // trickery on GNU windows, just on MSVC.
+    reference_tls_used();
+    #[cfg(target_env = "msvc")]
+    unsafe fn reference_tls_used() {
+        extern { static _tls_used: u8; }
+        ::intrinsics::volatile_load(&_tls_used);
+    }
+    #[cfg(not(target_env = "msvc"))]
+    unsafe fn reference_tls_used() {}
 }
 
 #[allow(dead_code)] // actually called above
@@ -266,9 +274,9 @@ unsafe fn run_dtors() {
             ret
         };
         for &(key, dtor) in &dtors {
-            let ptr = TlsGetValue(key);
+            let ptr = c::TlsGetValue(key);
             if !ptr.is_null() {
-                TlsSetValue(key, ptr::null_mut());
+                c::TlsSetValue(key, ptr::null_mut());
                 dtor(ptr as *mut _);
                 any_run = true;
             }

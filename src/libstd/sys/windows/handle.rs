@@ -8,16 +8,20 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![unstable(issue = "0", feature = "windows_handle")]
+
 use prelude::v1::*;
 
-use io::ErrorKind;
+use cmp;
+use io::{ErrorKind, Read};
 use io;
-use libc::funcs::extra::kernel32::{GetCurrentProcess, DuplicateHandle};
-use libc::{self, HANDLE};
 use mem;
 use ops::Deref;
 use ptr;
+use sys::c;
 use sys::cvt;
+use sys_common::io::read_to_end_uninitialized;
+use u32;
 
 /// An owned container for `HANDLE` object, closing them on Drop.
 ///
@@ -30,17 +34,31 @@ pub struct Handle(RawHandle);
 /// This does **not** drop the handle when it goes out of scope, use `Handle`
 /// instead for that.
 #[derive(Copy, Clone)]
-pub struct RawHandle(HANDLE);
+pub struct RawHandle(c::HANDLE);
 
 unsafe impl Send for RawHandle {}
 unsafe impl Sync for RawHandle {}
 
 impl Handle {
-    pub fn new(handle: HANDLE) -> Handle {
+    pub fn new(handle: c::HANDLE) -> Handle {
         Handle(RawHandle::new(handle))
     }
 
-    pub fn into_raw(self) -> HANDLE {
+    pub fn new_event(manual: bool, init: bool) -> io::Result<Handle> {
+        unsafe {
+            let event = c::CreateEventW(0 as *mut _,
+                                        manual as c::BOOL,
+                                        init as c::BOOL,
+                                        0 as *const _);
+            if event.is_null() {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(Handle::new(event))
+            }
+        }
+    }
+
+    pub fn into_raw(self) -> c::HANDLE {
         let ret = self.raw();
         mem::forget(self);
         return ret;
@@ -54,23 +72,25 @@ impl Deref for Handle {
 
 impl Drop for Handle {
     fn drop(&mut self) {
-        unsafe { let _ = libc::CloseHandle(self.raw()); }
+        unsafe { let _ = c::CloseHandle(self.raw()); }
     }
 }
 
 impl RawHandle {
-    pub fn new(handle: HANDLE) -> RawHandle {
+    pub fn new(handle: c::HANDLE) -> RawHandle {
         RawHandle(handle)
     }
 
-    pub fn raw(&self) -> HANDLE { self.0 }
+    pub fn raw(&self) -> c::HANDLE { self.0 }
 
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
         let mut read = 0;
+        // ReadFile takes a DWORD (u32) for the length so it only supports
+        // reading u32::MAX bytes at a time.
+        let len = cmp::min(buf.len(), u32::MAX as usize) as c::DWORD;
         let res = cvt(unsafe {
-            libc::ReadFile(self.0, buf.as_ptr() as libc::LPVOID,
-                           buf.len() as libc::DWORD, &mut read,
-                           ptr::null_mut())
+            c::ReadFile(self.0, buf.as_mut_ptr() as c::LPVOID,
+                        len, &mut read, ptr::null_mut())
         });
 
         match res {
@@ -86,25 +106,95 @@ impl RawHandle {
         }
     }
 
+    pub unsafe fn read_overlapped(&self,
+                                  buf: &mut [u8],
+                                  overlapped: *mut c::OVERLAPPED)
+                                  -> io::Result<Option<usize>> {
+        let len = cmp::min(buf.len(), <c::DWORD>::max_value() as usize) as c::DWORD;
+        let mut amt = 0;
+        let res = cvt({
+            c::ReadFile(self.0, buf.as_ptr() as c::LPVOID,
+                        len, &mut amt, overlapped)
+        });
+        match res {
+            Ok(_) => Ok(Some(amt as usize)),
+            Err(e) => {
+                if e.raw_os_error() == Some(c::ERROR_IO_PENDING as i32) {
+                    Ok(None)
+                } else if e.raw_os_error() == Some(c::ERROR_BROKEN_PIPE as i32) {
+                    Ok(Some(0))
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    pub fn overlapped_result(&self,
+                             overlapped: *mut c::OVERLAPPED,
+                             wait: bool) -> io::Result<usize> {
+        unsafe {
+            let mut bytes = 0;
+            let wait = if wait {c::TRUE} else {c::FALSE};
+            let res = cvt({
+                c::GetOverlappedResult(self.raw(), overlapped, &mut bytes, wait)
+            });
+            match res {
+                Ok(_) => Ok(bytes as usize),
+                Err(e) => {
+                    if e.raw_os_error() == Some(c::ERROR_HANDLE_EOF as i32) ||
+                       e.raw_os_error() == Some(c::ERROR_BROKEN_PIPE as i32) {
+                        Ok(0)
+                    } else {
+                        Err(e)
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn cancel_io(&self) -> io::Result<()> {
+        unsafe {
+            cvt(c::CancelIo(self.raw())).map(|_| ())
+        }
+    }
+
+    pub fn read_to_end(&self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        let mut me = self;
+        (&mut me).read_to_end(buf)
+    }
+
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
         let mut amt = 0;
-        try!(cvt(unsafe {
-            libc::WriteFile(self.0, buf.as_ptr() as libc::LPVOID,
-                            buf.len() as libc::DWORD, &mut amt,
-                            ptr::null_mut())
-        }));
+        // WriteFile takes a DWORD (u32) for the length so it only supports
+        // writing u32::MAX bytes at a time.
+        let len = cmp::min(buf.len(), u32::MAX as usize) as c::DWORD;
+        cvt(unsafe {
+            c::WriteFile(self.0, buf.as_ptr() as c::LPVOID,
+                         len, &mut amt, ptr::null_mut())
+        })?;
         Ok(amt as usize)
     }
 
-    pub fn duplicate(&self, access: libc::DWORD, inherit: bool,
-                     options: libc::DWORD) -> io::Result<Handle> {
-        let mut ret = 0 as libc::HANDLE;
-        try!(cvt(unsafe {
-            let cur_proc = GetCurrentProcess();
-            DuplicateHandle(cur_proc, self.0, cur_proc, &mut ret,
-                            access, inherit as libc::BOOL,
+    pub fn duplicate(&self, access: c::DWORD, inherit: bool,
+                     options: c::DWORD) -> io::Result<Handle> {
+        let mut ret = 0 as c::HANDLE;
+        cvt(unsafe {
+            let cur_proc = c::GetCurrentProcess();
+            c::DuplicateHandle(cur_proc, self.0, cur_proc, &mut ret,
+                            access, inherit as c::BOOL,
                             options)
-        }));
+        })?;
         Ok(Handle::new(ret))
+    }
+}
+
+impl<'a> Read for &'a RawHandle {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        (**self).read(buf)
+    }
+
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        unsafe { read_to_end_uninitialized(self, buf) }
     }
 }

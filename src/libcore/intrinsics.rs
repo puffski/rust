@@ -42,7 +42,8 @@
 #![unstable(feature = "core_intrinsics",
             reason = "intrinsics are unlikely to ever be stabilized, instead \
                       they should be used through stabilized interfaces \
-                      in the rest of the standard library")]
+                      in the rest of the standard library",
+            issue = "0")]
 #![allow(missing_docs)]
 
 use marker::Sized;
@@ -52,11 +53,45 @@ extern "rust-intrinsic" {
     // NB: These intrinsics take raw pointers because they mutate aliased
     // memory, which is not valid for either `&` or `&mut`.
 
+    #[cfg(all(stage0, not(cargobuild)))]
     pub fn atomic_cxchg<T>(dst: *mut T, old: T, src: T) -> T;
+    #[cfg(all(stage0, not(cargobuild)))]
     pub fn atomic_cxchg_acq<T>(dst: *mut T, old: T, src: T) -> T;
+    #[cfg(all(stage0, not(cargobuild)))]
     pub fn atomic_cxchg_rel<T>(dst: *mut T, old: T, src: T) -> T;
+    #[cfg(all(stage0, not(cargobuild)))]
     pub fn atomic_cxchg_acqrel<T>(dst: *mut T, old: T, src: T) -> T;
+    #[cfg(all(stage0, not(cargobuild)))]
     pub fn atomic_cxchg_relaxed<T>(dst: *mut T, old: T, src: T) -> T;
+
+    #[cfg(any(not(stage0), cargobuild))]
+    pub fn atomic_cxchg<T>(dst: *mut T, old: T, src: T) -> (T, bool);
+    #[cfg(any(not(stage0), cargobuild))]
+    pub fn atomic_cxchg_acq<T>(dst: *mut T, old: T, src: T) -> (T, bool);
+    #[cfg(any(not(stage0), cargobuild))]
+    pub fn atomic_cxchg_rel<T>(dst: *mut T, old: T, src: T) -> (T, bool);
+    #[cfg(any(not(stage0), cargobuild))]
+    pub fn atomic_cxchg_acqrel<T>(dst: *mut T, old: T, src: T) -> (T, bool);
+    #[cfg(any(not(stage0), cargobuild))]
+    pub fn atomic_cxchg_relaxed<T>(dst: *mut T, old: T, src: T) -> (T, bool);
+    #[cfg(any(not(stage0), cargobuild))]
+    pub fn atomic_cxchg_failrelaxed<T>(dst: *mut T, old: T, src: T) -> (T, bool);
+    #[cfg(any(not(stage0), cargobuild))]
+    pub fn atomic_cxchg_failacq<T>(dst: *mut T, old: T, src: T) -> (T, bool);
+    #[cfg(any(not(stage0), cargobuild))]
+    pub fn atomic_cxchg_acq_failrelaxed<T>(dst: *mut T, old: T, src: T) -> (T, bool);
+    #[cfg(any(not(stage0), cargobuild))]
+    pub fn atomic_cxchg_acqrel_failrelaxed<T>(dst: *mut T, old: T, src: T) -> (T, bool);
+
+    pub fn atomic_cxchgweak<T>(dst: *mut T, old: T, src: T) -> (T, bool);
+    pub fn atomic_cxchgweak_acq<T>(dst: *mut T, old: T, src: T) -> (T, bool);
+    pub fn atomic_cxchgweak_rel<T>(dst: *mut T, old: T, src: T) -> (T, bool);
+    pub fn atomic_cxchgweak_acqrel<T>(dst: *mut T, old: T, src: T) -> (T, bool);
+    pub fn atomic_cxchgweak_relaxed<T>(dst: *mut T, old: T, src: T) -> (T, bool);
+    pub fn atomic_cxchgweak_failrelaxed<T>(dst: *mut T, old: T, src: T) -> (T, bool);
+    pub fn atomic_cxchgweak_failacq<T>(dst: *mut T, old: T, src: T) -> (T, bool);
+    pub fn atomic_cxchgweak_acq_failrelaxed<T>(dst: *mut T, old: T, src: T) -> (T, bool);
+    pub fn atomic_cxchgweak_acqrel_failrelaxed<T>(dst: *mut T, old: T, src: T) -> (T, bool);
 
     pub fn atomic_load<T>(src: *const T) -> T;
     pub fn atomic_load_acq<T>(src: *const T) -> T;
@@ -184,25 +219,36 @@ extern "rust-intrinsic" {
     /// elements.
     pub fn size_of<T>() -> usize;
 
-    #[cfg(not(stage0))]
     /// Moves a value to an uninitialized memory location.
     ///
     /// Drop glue is not run on the destination.
     pub fn move_val_init<T>(dst: *mut T, src: T);
-
-    // SNAP d4432b3
-    #[cfg(stage0)]
-    /// Moves a value to an uninitialized memory location.
-    ///
-    /// Drop glue is not run on the destination.
-    pub fn move_val_init<T>(dst: &mut T, src: T);
 
     pub fn min_align_of<T>() -> usize;
     pub fn pref_align_of<T>() -> usize;
 
     pub fn size_of_val<T: ?Sized>(_: &T) -> usize;
     pub fn min_align_of_val<T: ?Sized>(_: &T) -> usize;
-    pub fn drop_in_place<T: ?Sized>(_: *mut T);
+
+    /// Executes the destructor (if any) of the pointed-to value.
+    ///
+    /// This has two use cases:
+    ///
+    /// * It is *required* to use `drop_in_place` to drop unsized types like
+    ///   trait objects, because they can't be read out onto the stack and
+    ///   dropped normally.
+    ///
+    /// * It is friendlier to the optimizer to do this over `ptr::read` when
+    ///   dropping manually allocated memory (e.g. when writing Box/Rc/Vec),
+    ///   as the compiler doesn't need to prove that it's sound to elide the
+    ///   copy.
+    ///
+    /// # Undefined Behavior
+    ///
+    /// This has all the same safety problems as `ptr::read` with respect to
+    /// invalid pointers, types, and double drops.
+    #[stable(feature = "drop_in_place", since = "1.8.0")]
+    pub fn drop_in_place<T: ?Sized>(to_drop: *mut T);
 
     /// Gets a static string slice containing the name of a type.
     pub fn type_name<T: ?Sized>() -> &'static str;
@@ -254,11 +300,11 @@ extern "rust-intrinsic" {
     /// ```
     /// use std::mem;
     ///
-    /// let v: &[u8] = unsafe { mem::transmute("L") };
-    /// assert!(v == [76]);
+    /// let array: &[u8] = unsafe { mem::transmute("Rust") };
+    /// assert_eq!(array, [82, 117, 115, 116]);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn transmute<T,U>(e: T) -> U;
+    pub fn transmute<T, U>(e: T) -> U;
 
     /// Gives the address for the return value of the enclosing function.
     ///
@@ -308,7 +354,7 @@ extern "rust-intrinsic" {
     /// # Safety
     ///
     /// Beyond requiring that the program must be allowed to access both regions
-    /// of memory, it is Undefined Behaviour for source and destination to
+    /// of memory, it is Undefined Behavior for source and destination to
     /// overlap. Care must also be taken with the ownership of `src` and
     /// `dst`. This method semantically moves the values of `src` into `dst`.
     /// However it does not drop the contents of `dst`, or prevent the contents
@@ -322,6 +368,7 @@ extern "rust-intrinsic" {
     /// use std::mem;
     /// use std::ptr;
     ///
+    /// # #[allow(dead_code)]
     /// fn swap<T>(x: &mut T, y: &mut T) {
     ///     unsafe {
     ///         // Give ourselves some scratch space to work with
@@ -360,6 +407,7 @@ extern "rust-intrinsic" {
     /// ```
     /// use std::ptr;
     ///
+    /// # #[allow(dead_code)]
     /// unsafe fn from_buf_raw<T>(ptr: *const T, elts: usize) -> Vec<T> {
     ///     let mut dst = Vec::with_capacity(elts);
     ///     dst.set_len(elts);
@@ -372,7 +420,7 @@ extern "rust-intrinsic" {
     pub fn copy<T>(src: *const T, dst: *mut T, count: usize);
 
     /// Invokes memset on the specified pointer, setting `count * size_of::<T>()`
-    /// bytes of memory starting at `dst` to `c`.
+    /// bytes of memory starting at `dst` to `val`.
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn write_bytes<T>(dst: *mut T, val: u8, count: usize);
 
@@ -380,20 +428,20 @@ extern "rust-intrinsic" {
     /// a size of `count` * `size_of::<T>()` and an alignment of
     /// `min_align_of::<T>()`
     ///
-    /// The volatile parameter parameter is set to `true`, so it will not be optimized out.
+    /// The volatile parameter is set to `true`, so it will not be optimized out.
     pub fn volatile_copy_nonoverlapping_memory<T>(dst: *mut T, src: *const T,
                                                   count: usize);
     /// Equivalent to the appropriate `llvm.memmove.p0i8.0i8.*` intrinsic, with
     /// a size of `count` * `size_of::<T>()` and an alignment of
     /// `min_align_of::<T>()`
     ///
-    /// The volatile parameter parameter is set to `true`, so it will not be optimized out.
+    /// The volatile parameter is set to `true`, so it will not be optimized out.
     pub fn volatile_copy_memory<T>(dst: *mut T, src: *const T, count: usize);
     /// Equivalent to the appropriate `llvm.memset.p0i8.*` intrinsic, with a
     /// size of `count` * `size_of::<T>()` and an alignment of
     /// `min_align_of::<T>()`.
     ///
-    /// The volatile parameter parameter is set to `true`, so it will not be optimized out.
+    /// The volatile parameter is set to `true`, so it will not be optimized out.
     pub fn volatile_set_memory<T>(dst: *mut T, val: u8, count: usize);
 
     /// Perform a volatile load from the `src` pointer.
@@ -498,122 +546,78 @@ extern "rust-intrinsic" {
     /// Returns the nearest integer to an `f64`. Rounds half-way cases away from zero.
     pub fn roundf64(x: f64) -> f64;
 
-    /// Returns the number of bits set in a `u8`.
-    pub fn ctpop8(x: u8) -> u8;
-    /// Returns the number of bits set in a `u16`.
-    pub fn ctpop16(x: u16) -> u16;
-    /// Returns the number of bits set in a `u32`.
-    pub fn ctpop32(x: u32) -> u32;
-    /// Returns the number of bits set in a `u64`.
-    pub fn ctpop64(x: u64) -> u64;
+    /// Float addition that allows optimizations based on algebraic rules.
+    /// May assume inputs are finite.
+    #[cfg(not(stage0))]
+    pub fn fadd_fast<T>(a: T, b: T) -> T;
 
-    /// Returns the number of leading bits unset in a `u8`.
-    pub fn ctlz8(x: u8) -> u8;
-    /// Returns the number of leading bits unset in a `u16`.
-    pub fn ctlz16(x: u16) -> u16;
-    /// Returns the number of leading bits unset in a `u32`.
-    pub fn ctlz32(x: u32) -> u32;
-    /// Returns the number of leading bits unset in a `u64`.
-    pub fn ctlz64(x: u64) -> u64;
+    /// Float subtraction that allows optimizations based on algebraic rules.
+    /// May assume inputs are finite.
+    #[cfg(not(stage0))]
+    pub fn fsub_fast<T>(a: T, b: T) -> T;
 
-    /// Returns the number of trailing bits unset in a `u8`.
-    pub fn cttz8(x: u8) -> u8;
-    /// Returns the number of trailing bits unset in a `u16`.
-    pub fn cttz16(x: u16) -> u16;
-    /// Returns the number of trailing bits unset in a `u32`.
-    pub fn cttz32(x: u32) -> u32;
-    /// Returns the number of trailing bits unset in a `u64`.
-    pub fn cttz64(x: u64) -> u64;
+    /// Float multiplication that allows optimizations based on algebraic rules.
+    /// May assume inputs are finite.
+    #[cfg(not(stage0))]
+    pub fn fmul_fast<T>(a: T, b: T) -> T;
 
-    /// Reverses the bytes in a `u16`.
-    pub fn bswap16(x: u16) -> u16;
-    /// Reverses the bytes in a `u32`.
-    pub fn bswap32(x: u32) -> u32;
-    /// Reverses the bytes in a `u64`.
-    pub fn bswap64(x: u64) -> u64;
+    /// Float division that allows optimizations based on algebraic rules.
+    /// May assume inputs are finite.
+    #[cfg(not(stage0))]
+    pub fn fdiv_fast<T>(a: T, b: T) -> T;
 
-    /// Performs checked `i8` addition.
-    pub fn i8_add_with_overflow(x: i8, y: i8) -> (i8, bool);
-    /// Performs checked `i16` addition.
-    pub fn i16_add_with_overflow(x: i16, y: i16) -> (i16, bool);
-    /// Performs checked `i32` addition.
-    pub fn i32_add_with_overflow(x: i32, y: i32) -> (i32, bool);
-    /// Performs checked `i64` addition.
-    pub fn i64_add_with_overflow(x: i64, y: i64) -> (i64, bool);
+    /// Float remainder that allows optimizations based on algebraic rules.
+    /// May assume inputs are finite.
+    #[cfg(not(stage0))]
+    pub fn frem_fast<T>(a: T, b: T) -> T;
 
-    /// Performs checked `u8` addition.
-    pub fn u8_add_with_overflow(x: u8, y: u8) -> (u8, bool);
-    /// Performs checked `u16` addition.
-    pub fn u16_add_with_overflow(x: u16, y: u16) -> (u16, bool);
-    /// Performs checked `u32` addition.
-    pub fn u32_add_with_overflow(x: u32, y: u32) -> (u32, bool);
-    /// Performs checked `u64` addition.
-    pub fn u64_add_with_overflow(x: u64, y: u64) -> (u64, bool);
 
-    /// Performs checked `i8` subtraction.
-    pub fn i8_sub_with_overflow(x: i8, y: i8) -> (i8, bool);
-    /// Performs checked `i16` subtraction.
-    pub fn i16_sub_with_overflow(x: i16, y: i16) -> (i16, bool);
-    /// Performs checked `i32` subtraction.
-    pub fn i32_sub_with_overflow(x: i32, y: i32) -> (i32, bool);
-    /// Performs checked `i64` subtraction.
-    pub fn i64_sub_with_overflow(x: i64, y: i64) -> (i64, bool);
+    /// Returns the number of bits set in an integer type `T`
+    pub fn ctpop<T>(x: T) -> T;
 
-    /// Performs checked `u8` subtraction.
-    pub fn u8_sub_with_overflow(x: u8, y: u8) -> (u8, bool);
-    /// Performs checked `u16` subtraction.
-    pub fn u16_sub_with_overflow(x: u16, y: u16) -> (u16, bool);
-    /// Performs checked `u32` subtraction.
-    pub fn u32_sub_with_overflow(x: u32, y: u32) -> (u32, bool);
-    /// Performs checked `u64` subtraction.
-    pub fn u64_sub_with_overflow(x: u64, y: u64) -> (u64, bool);
+    /// Returns the number of leading bits unset in an integer type `T`
+    pub fn ctlz<T>(x: T) -> T;
 
-    /// Performs checked `i8` multiplication.
-    pub fn i8_mul_with_overflow(x: i8, y: i8) -> (i8, bool);
-    /// Performs checked `i16` multiplication.
-    pub fn i16_mul_with_overflow(x: i16, y: i16) -> (i16, bool);
-    /// Performs checked `i32` multiplication.
-    pub fn i32_mul_with_overflow(x: i32, y: i32) -> (i32, bool);
-    /// Performs checked `i64` multiplication.
-    pub fn i64_mul_with_overflow(x: i64, y: i64) -> (i64, bool);
+    /// Returns the number of trailing bits unset in an integer type `T`
+    pub fn cttz<T>(x: T) -> T;
 
-    /// Performs checked `u8` multiplication.
-    pub fn u8_mul_with_overflow(x: u8, y: u8) -> (u8, bool);
-    /// Performs checked `u16` multiplication.
-    pub fn u16_mul_with_overflow(x: u16, y: u16) -> (u16, bool);
-    /// Performs checked `u32` multiplication.
-    pub fn u32_mul_with_overflow(x: u32, y: u32) -> (u32, bool);
-    /// Performs checked `u64` multiplication.
-    pub fn u64_mul_with_overflow(x: u64, y: u64) -> (u64, bool);
+    /// Reverses the bytes in an integer type `T`.
+    pub fn bswap<T>(x: T) -> T;
 
-    /// Returns (a + b) mod 2^N, where N is the width of N in bits.
+    /// Performs checked integer addition.
+    pub fn add_with_overflow<T>(x: T, y: T) -> (T, bool);
+
+    /// Performs checked integer subtraction
+    pub fn sub_with_overflow<T>(x: T, y: T) -> (T, bool);
+
+    /// Performs checked integer multiplication
+    pub fn mul_with_overflow<T>(x: T, y: T) -> (T, bool);
+
+    /// Performs an unchecked division, resulting in undefined behavior
+    /// where y = 0 or x = `T::min_value()` and y = -1
+    pub fn unchecked_div<T>(x: T, y: T) -> T;
+    /// Returns the remainder of an unchecked division, resulting in
+    /// undefined behavior where y = 0 or x = `T::min_value()` and y = -1
+    pub fn unchecked_rem<T>(x: T, y: T) -> T;
+
+    /// Returns (a + b) mod 2^N, where N is the width of T in bits.
     pub fn overflowing_add<T>(a: T, b: T) -> T;
-    /// Returns (a - b) mod 2^N, where N is the width of N in bits.
+    /// Returns (a - b) mod 2^N, where N is the width of T in bits.
     pub fn overflowing_sub<T>(a: T, b: T) -> T;
-    /// Returns (a * b) mod 2^N, where N is the width of N in bits.
+    /// Returns (a * b) mod 2^N, where N is the width of T in bits.
     pub fn overflowing_mul<T>(a: T, b: T) -> T;
-
-    /// Performs an unchecked signed division, which results in undefined behavior,
-    /// in cases where y == 0, or x == isize::MIN and y == -1
-    pub fn unchecked_sdiv<T>(x: T, y: T) -> T;
-    /// Performs an unchecked unsigned division, which results in undefined behavior,
-    /// in cases where y == 0
-    pub fn unchecked_udiv<T>(x: T, y: T) -> T;
-
-    /// Returns the remainder of an unchecked signed division, which results in
-    /// undefined behavior, in cases where y == 0, or x == isize::MIN and y == -1
-    pub fn unchecked_srem<T>(x: T, y: T) -> T;
-    /// Returns the remainder of an unchecked unsigned division, which results in
-    /// undefined behavior, in cases where y == 0
-    pub fn unchecked_urem<T>(x: T, y: T) -> T;
 
     /// Returns the value of the discriminant for the variant in 'v',
     /// cast to a `u64`; if `T` has no discriminant, returns 0.
     pub fn discriminant_value<T>(v: &T) -> u64;
 
     /// Rust's "try catch" construct which invokes the function pointer `f` with
-    /// the data pointer `data`, returning the exception payload if an exception
-    /// is thrown (aka the thread panics).
-    #[cfg(not(stage0))]
-    pub fn try(f: fn(*mut u8), data: *mut u8) -> *mut u8;
+    /// the data pointer `data`.
+    ///
+    /// The third pointer is a target-specific data pointer which is filled in
+    /// with the specifics of the exception that occurred. For examples on Unix
+    /// platforms this is a `*mut *mut T` which is filled in by the compiler and
+    /// on MSVC it's `*mut [usize; 2]`. For more information see the compiler's
+    /// source as well as std's catch implementation.
+    pub fn try(f: fn(*mut u8), data: *mut u8, local_ptr: *mut u8) -> i32;
 }

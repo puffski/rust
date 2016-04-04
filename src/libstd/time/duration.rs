@@ -8,15 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! Temporal quantification
-
-#![unstable(feature = "duration", reason = "recently added API per RFC 1040")]
-
-use prelude::v1::*;
-
-use fmt;
-use ops::{Add, Sub, Mul, Div};
-use sys::time::SteadyTime;
+use ops::{Add, Sub, Mul, Div, AddAssign, SubAssign, MulAssign, DivAssign};
 
 const NANOS_PER_SEC: u32 = 1_000_000_000;
 const NANOS_PER_MILLI: u32 = 1_000_000;
@@ -36,53 +28,44 @@ const MILLIS_PER_SEC: u64 = 1_000;
 /// # Examples
 ///
 /// ```
-/// #![feature(duration)]
 /// use std::time::Duration;
 ///
 /// let five_seconds = Duration::new(5, 0);
 /// let five_seconds_and_five_nanos = five_seconds + Duration::new(0, 5);
 ///
-/// assert_eq!(five_seconds_and_five_nanos.secs(), 5);
-/// assert_eq!(five_seconds_and_five_nanos.extra_nanos(), 5);
+/// assert_eq!(five_seconds_and_five_nanos.as_secs(), 5);
+/// assert_eq!(five_seconds_and_five_nanos.subsec_nanos(), 5);
 ///
 /// let ten_millis = Duration::from_millis(10);
 /// ```
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+#[stable(feature = "duration", since = "1.3.0")]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub struct Duration {
     secs: u64,
     nanos: u32, // Always 0 <= nanos < NANOS_PER_SEC
 }
 
 impl Duration {
-    /// Crates a new `Duration` from the specified number of seconds and
+    /// Creates a new `Duration` from the specified number of seconds and
     /// additional nanosecond precision.
     ///
     /// If the nanoseconds is greater than 1 billion (the number of nanoseconds
     /// in a second), then it will carry over into the seconds provided.
+    #[stable(feature = "duration", since = "1.3.0")]
     pub fn new(secs: u64, nanos: u32) -> Duration {
         let secs = secs + (nanos / NANOS_PER_SEC) as u64;
         let nanos = nanos % NANOS_PER_SEC;
         Duration { secs: secs, nanos: nanos }
     }
 
-    /// Runs a closure, returning the duration of time it took to run the
-    /// closure.
-    #[unstable(feature = "duration_span",
-               reason = "unsure if this is the right API or whether it should \
-                         wait for a more general \"moment in time\" \
-                         abstraction")]
-    pub fn span<F>(f: F) -> Duration where F: FnOnce() {
-        let start = SteadyTime::now();
-        f();
-        &SteadyTime::now() - &start
-    }
-
     /// Creates a new `Duration` from the specified number of seconds.
+    #[stable(feature = "duration", since = "1.3.0")]
     pub fn from_secs(secs: u64) -> Duration {
         Duration { secs: secs, nanos: 0 }
     }
 
     /// Creates a new `Duration` from the specified number of milliseconds.
+    #[stable(feature = "duration", since = "1.3.0")]
     pub fn from_millis(millis: u64) -> Duration {
         let secs = millis / MILLIS_PER_SEC;
         let nanos = ((millis % MILLIS_PER_SEC) as u32) * NANOS_PER_MILLI;
@@ -93,16 +76,19 @@ impl Duration {
     ///
     /// The extra precision represented by this duration is ignored (e.g. extra
     /// nanoseconds are not represented in the returned value).
-    pub fn secs(&self) -> u64 { self.secs }
+    #[stable(feature = "duration", since = "1.3.0")]
+    pub fn as_secs(&self) -> u64 { self.secs }
 
     /// Returns the nanosecond precision represented by this duration.
     ///
     /// This method does **not** return the length of the duration when
     /// represented by nanoseconds. The returned number always represents a
     /// fractional portion of a second (e.g. it is less than one billion).
-    pub fn extra_nanos(&self) -> u32 { self.nanos }
+    #[stable(feature = "duration", since = "1.3.0")]
+    pub fn subsec_nanos(&self) -> u32 { self.nanos }
 }
 
+#[stable(feature = "duration", since = "1.3.0")]
 impl Add for Duration {
     type Output = Duration;
 
@@ -119,6 +105,14 @@ impl Add for Duration {
     }
 }
 
+#[stable(feature = "time_augmented_assignment", since = "1.9.0")]
+impl AddAssign for Duration {
+    fn add_assign(&mut self, rhs: Duration) {
+        *self = *self + rhs;
+    }
+}
+
+#[stable(feature = "duration", since = "1.3.0")]
 impl Sub for Duration {
     type Output = Duration;
 
@@ -137,6 +131,14 @@ impl Sub for Duration {
     }
 }
 
+#[stable(feature = "time_augmented_assignment", since = "1.9.0")]
+impl SubAssign for Duration {
+    fn sub_assign(&mut self, rhs: Duration) {
+        *self = *self - rhs;
+    }
+}
+
+#[stable(feature = "duration", since = "1.3.0")]
 impl Mul<u32> for Duration {
     type Output = Duration;
 
@@ -153,6 +155,14 @@ impl Mul<u32> for Duration {
     }
 }
 
+#[stable(feature = "time_augmented_assignment", since = "1.9.0")]
+impl MulAssign<u32> for Duration {
+    fn mul_assign(&mut self, rhs: u32) {
+        *self = *self * rhs;
+    }
+}
+
+#[stable(feature = "duration", since = "1.3.0")]
 impl Div<u32> for Duration {
     type Output = Duration;
 
@@ -166,23 +176,15 @@ impl Div<u32> for Duration {
     }
 }
 
-impl fmt::Display for Duration {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match (self.secs, self.nanos) {
-            (s, 0) => write!(f, "{}s", s),
-            (0, n) if n % NANOS_PER_MILLI == 0 => write!(f, "{}ms",
-                                                         n / NANOS_PER_MILLI),
-            (0, n) if n % 1_000 == 0 => write!(f, "{}µs", n / 1_000),
-            (0, n) => write!(f, "{}ns", n),
-            (s, n) => write!(f, "{}.{}s", s,
-                             format!("{:09}", n).trim_right_matches('0'))
-        }
+#[stable(feature = "time_augmented_assignment", since = "1.9.0")]
+impl DivAssign<u32> for Duration {
+    fn div_assign(&mut self, rhs: u32) {
+        *self = *self / rhs;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use prelude::v1::*;
     use super::Duration;
 
     #[test]
@@ -197,20 +199,20 @@ mod tests {
 
     #[test]
     fn secs() {
-        assert_eq!(Duration::new(0, 0).secs(), 0);
-        assert_eq!(Duration::from_secs(1).secs(), 1);
-        assert_eq!(Duration::from_millis(999).secs(), 0);
-        assert_eq!(Duration::from_millis(1001).secs(), 1);
+        assert_eq!(Duration::new(0, 0).as_secs(), 0);
+        assert_eq!(Duration::from_secs(1).as_secs(), 1);
+        assert_eq!(Duration::from_millis(999).as_secs(), 0);
+        assert_eq!(Duration::from_millis(1001).as_secs(), 1);
     }
 
     #[test]
     fn nanos() {
-        assert_eq!(Duration::new(0, 0).extra_nanos(), 0);
-        assert_eq!(Duration::new(0, 5).extra_nanos(), 5);
-        assert_eq!(Duration::new(0, 1_000_000_001).extra_nanos(), 1);
-        assert_eq!(Duration::from_secs(1).extra_nanos(), 0);
-        assert_eq!(Duration::from_millis(999).extra_nanos(), 999 * 1_000_000);
-        assert_eq!(Duration::from_millis(1001).extra_nanos(), 1 * 1_000_000);
+        assert_eq!(Duration::new(0, 0).subsec_nanos(), 0);
+        assert_eq!(Duration::new(0, 5).subsec_nanos(), 5);
+        assert_eq!(Duration::new(0, 1_000_000_001).subsec_nanos(), 1);
+        assert_eq!(Duration::from_secs(1).subsec_nanos(), 0);
+        assert_eq!(Duration::from_millis(999).subsec_nanos(), 999 * 1_000_000);
+        assert_eq!(Duration::from_millis(1001).subsec_nanos(), 1 * 1_000_000);
     }
 
     #[test]
@@ -256,19 +258,5 @@ mod tests {
         assert_eq!(Duration::new(1, 1) / 3, Duration::new(0, 333_333_333));
         assert_eq!(Duration::new(99, 999_999_000) / 100,
                    Duration::new(0, 999_999_990));
-    }
-
-    #[test]
-    fn display() {
-        assert_eq!(Duration::new(0, 2).to_string(), "2ns");
-        assert_eq!(Duration::new(0, 2_000_000).to_string(), "2ms");
-        assert_eq!(Duration::new(2, 0).to_string(), "2s");
-        assert_eq!(Duration::new(2, 2).to_string(), "2.000000002s");
-        assert_eq!(Duration::new(2, 2_000_000).to_string(),
-                   "2.002s");
-        assert_eq!(Duration::new(0, 2_000_002).to_string(),
-                   "2000002ns");
-        assert_eq!(Duration::new(2, 2_000_002).to_string(),
-                   "2.002000002s");
     }
 }

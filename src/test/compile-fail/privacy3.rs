@@ -8,8 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(start, no_std)]
-#![no_std] // makes debugging this test *a lot* easier (during resolve)
+#![feature(start, no_core)]
+#![no_core] // makes debugging this test *a lot* easier (during resolve)
 
 // Test to make sure that private items imported through globs remain private
 // when  they're used.
@@ -27,6 +27,9 @@ pub fn foo() {}
 fn test1() {
     use bar::gpriv;
     //~^ ERROR unresolved import `bar::gpriv`. There is no `gpriv` in `bar`
+
+    // This should pass because the compiler will insert a fake name binding
+    // for `gpriv`
     gpriv();
 }
 

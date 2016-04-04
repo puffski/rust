@@ -20,43 +20,40 @@
 //! provide for basic string-related manipulations. This crate does not
 //! (yet) aim to provide a full set of Unicode tables.
 
-// Do not remove on snapshot creation. Needed for bootstrap. (Issue #22364)
-#![cfg_attr(stage0, feature(custom_attribute))]
 #![crate_name = "rustc_unicode"]
-#![unstable(feature = "unicode")]
-#![staged_api]
+#![unstable(feature = "unicode", issue = "27783")]
 #![crate_type = "rlib"]
-#![doc(html_logo_url = "http://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
+#![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
-       html_root_url = "http://doc.rust-lang.org/nightly/",
-       html_playground_url = "http://play.rust-lang.org/",
-       test(no_crate_inject))]
+       html_root_url = "https://doc.rust-lang.org/nightly/",
+       html_playground_url = "https://play.rust-lang.org/",
+       issue_tracker_base_url = "https://github.com/rust-lang/rust/issues/",
+       test(no_crate_inject, attr(allow(unused_variables), deny(warnings))))]
+#![cfg_attr(not(stage0), deny(warnings))]
 #![no_std]
 
-#![feature(core)]
 #![feature(core_char_ext)]
-#![feature(core_prelude)]
-#![feature(core_slice_ext)]
-#![feature(core_str_ext)]
-#![feature(iter_arith)]
 #![feature(lang_items)]
-#![feature(no_std)]
 #![feature(staged_api)]
+#![feature(unicode)]
 
-extern crate core;
-
-mod normalize;
 mod tables;
 mod u_str;
 pub mod char;
 
+#[allow(deprecated)]
 pub mod str {
-    pub use u_str::{UnicodeStr, SplitWhitespace, Words, Graphemes, GraphemeIndices};
-    pub use u_str::{utf8_char_width, is_utf16, Utf16Items, Utf16Item};
-    pub use u_str::{utf16_items, Utf16Encoder};
+    pub use u_str::{UnicodeStr, SplitWhitespace};
+    pub use u_str::{utf8_char_width, is_utf16};
+    pub use u_str::{Utf16Encoder};
 }
 
 // For use in libcollections, not re-exported in libstd.
 pub mod derived_property {
     pub use tables::derived_property::{Cased, Case_Ignorable};
+}
+
+// For use in libsyntax
+pub mod property {
+    pub use tables::property::Pattern_White_Space;
 }

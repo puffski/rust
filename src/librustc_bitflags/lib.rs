@@ -9,21 +9,19 @@
 // except according to those terms.
 
 
-// Do not remove on snapshot creation. Needed for bootstrap. (Issue #22364)
-#![cfg_attr(stage0, feature(custom_attribute))]
 #![crate_name = "rustc_bitflags"]
 #![feature(associated_consts)]
 #![feature(staged_api)]
-#![staged_api]
 #![crate_type = "rlib"]
-#![feature(no_std)]
 #![no_std]
-#![unstable(feature = "rustc_private")]
-#![cfg_attr(test, feature(hash_default))]
+#![unstable(feature = "rustc_private", issue = "27812")]
+#![cfg_attr(not(stage0), deny(warnings))]
 
 //! A typesafe bitmask flag generator.
 
-#[cfg(test)] #[macro_use] extern crate std;
+#[cfg(test)]
+#[macro_use]
+extern crate std;
 
 /// The `bitflags!` macro generates a `struct` that holds a set of C-style
 /// bitmask flags. It is useful for creating typesafe wrappers for C APIs.
@@ -34,8 +32,8 @@
 /// # Examples
 ///
 /// ```{.rust}
-/// # #![feature(rustc_private)]
-/// # #![feature(associated_consts)]
+/// #![feature(rustc_private)]
+/// #![feature(associated_consts)]
 /// #[macro_use] extern crate rustc_bitflags;
 ///
 /// bitflags! {
@@ -62,7 +60,7 @@
 /// The generated `struct`s can also be extended with type and trait implementations:
 ///
 /// ```{.rust}
-/// # #![feature(rustc_private)]
+/// #![feature(rustc_private)]
 /// #[macro_use] extern crate rustc_bitflags;
 ///
 /// use std::fmt;
@@ -290,17 +288,10 @@ macro_rules! bitflags {
     };
 }
 
-// This is a no_std crate. So the test code's invocation of #[derive] etc, via
-// bitflags!, will use names from the underlying crates.
-#[cfg(test)]
-mod core {
-    pub use std::{fmt, hash, clone, cmp, marker, option};
-}
-
 #[cfg(test)]
 #[allow(non_upper_case_globals)]
 mod tests {
-    use std::hash::{self, SipHasher};
+    use std::hash::{Hasher, Hash, SipHasher};
     use std::option::Option::{Some, None};
 
     bitflags! {
@@ -329,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn test_bits(){
+    fn test_bits() {
         assert_eq!(Flags::empty().bits(), 0b00000000);
         assert_eq!(Flags::FlagA.bits(), 0b00000001);
         assert_eq!(Flags::FlagABC.bits(), 0b00000111);
@@ -362,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_empty(){
+    fn test_is_empty() {
         assert!(Flags::empty().is_empty());
         assert!(!Flags::FlagA.is_empty());
         assert!(!Flags::FlagABC.is_empty());
@@ -421,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn test_insert(){
+    fn test_insert() {
         let mut e1 = Flags::FlagA;
         let e2 = Flags::FlagA | Flags::FlagB;
         e1.insert(e2);
@@ -433,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn test_remove(){
+    fn test_remove() {
         let mut e1 = Flags::FlagA | Flags::FlagB;
         let e2 = Flags::FlagA | Flags::FlagC;
         e1.remove(e2);
@@ -492,11 +483,17 @@ mod tests {
 
     #[test]
     fn test_hash() {
-      let mut x = Flags::empty();
-      let mut y = Flags::empty();
-      assert!(hash::hash::<Flags, SipHasher>(&x) == hash::hash::<Flags, SipHasher>(&y));
-      x = Flags::all();
-      y = Flags::FlagABC;
-      assert!(hash::hash::<Flags, SipHasher>(&x) == hash::hash::<Flags, SipHasher>(&y));
+        let mut x = Flags::empty();
+        let mut y = Flags::empty();
+        assert!(hash(&x) == hash(&y));
+        x = Flags::all();
+        y = Flags::FlagABC;
+        assert!(hash(&x) == hash(&y));
+    }
+
+    fn hash<T: Hash>(t: &T) -> u64 {
+        let mut s = SipHasher::new();
+        t.hash(&mut s);
+        s.finish()
     }
 }

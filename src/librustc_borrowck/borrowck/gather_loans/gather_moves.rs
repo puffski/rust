@@ -16,12 +16,14 @@ use borrowck::gather_loans::move_error::{MoveError, MoveErrorCollector};
 use borrowck::move_data::*;
 use rustc::middle::expr_use_visitor as euv;
 use rustc::middle::mem_categorization as mc;
+use rustc::middle::mem_categorization::Categorization;
 use rustc::middle::mem_categorization::InteriorOffsetKind as Kind;
-use rustc::middle::ty;
+use rustc::ty;
 
 use std::rc::Rc;
 use syntax::ast;
 use syntax::codemap::Span;
+use rustc_front::hir::{self, PatKind};
 
 struct GatherMoveInfo<'tcx> {
     id: ast::NodeId,
@@ -42,7 +44,7 @@ pub fn gather_decl<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>,
 
 pub fn gather_move_from_expr<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>,
                                        move_data: &MoveData<'tcx>,
-                                       move_error_collector: &MoveErrorCollector<'tcx>,
+                                       move_error_collector: &mut MoveErrorCollector<'tcx>,
                                        move_expr_id: ast::NodeId,
                                        cmt: mc::cmt<'tcx>,
                                        move_reason: euv::MoveReason) {
@@ -61,8 +63,8 @@ pub fn gather_move_from_expr<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>,
 
 pub fn gather_match_variant<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>,
                                       move_data: &MoveData<'tcx>,
-                                      _move_error_collector: &MoveErrorCollector<'tcx>,
-                                      move_pat: &ast::Pat,
+                                      _move_error_collector: &mut MoveErrorCollector<'tcx>,
+                                      move_pat: &hir::Pat,
                                       cmt: mc::cmt<'tcx>,
                                       mode: euv::MatchMode) {
     let tcx = bccx.tcx;
@@ -76,8 +78,8 @@ pub fn gather_match_variant<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>,
                 LpDowncast(ref base_lp, _) =>
                     move_data.add_variant_match(
                         tcx, lp.clone(), move_pat.id, base_lp.clone(), mode),
-                _ => panic!("should only call gather_match_variant \
-                             for cat_downcast cmt"),
+                _ => bug!("should only call gather_match_variant \
+                           for cat_downcast cmt"),
             }
         }
         None => {
@@ -92,13 +94,13 @@ pub fn gather_match_variant<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>,
 
 pub fn gather_move_from_pat<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>,
                                       move_data: &MoveData<'tcx>,
-                                      move_error_collector: &MoveErrorCollector<'tcx>,
-                                      move_pat: &ast::Pat,
+                                      move_error_collector: &mut MoveErrorCollector<'tcx>,
+                                      move_pat: &hir::Pat,
                                       cmt: mc::cmt<'tcx>) {
     let pat_span_path_opt = match move_pat.node {
-        ast::PatIdent(_, ref path1, _) => {
+        PatKind::Ident(_, ref path1, _) => {
             Some(MoveSpanAndPath{span: move_pat.span,
-                                 ident: path1.node})
+                                 name: path1.node.name})
         },
         _ => None,
     };
@@ -113,7 +115,7 @@ pub fn gather_move_from_pat<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>,
 
 fn gather_move<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>,
                          move_data: &MoveData<'tcx>,
-                         move_error_collector: &MoveErrorCollector<'tcx>,
+                         move_error_collector: &mut MoveErrorCollector<'tcx>,
                          move_info: GatherMoveInfo<'tcx>) {
     debug!("gather_move(move_id={}, cmt={:?})",
            move_info.id, move_info.cmt);
@@ -162,25 +164,25 @@ fn check_and_get_illegal_move_origin<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>,
                                                cmt: &mc::cmt<'tcx>)
                                                -> Option<mc::cmt<'tcx>> {
     match cmt.cat {
-        mc::cat_deref(_, _, mc::BorrowedPtr(..)) |
-        mc::cat_deref(_, _, mc::Implicit(..)) |
-        mc::cat_deref(_, _, mc::UnsafePtr(..)) |
-        mc::cat_static_item => {
+        Categorization::Deref(_, _, mc::BorrowedPtr(..)) |
+        Categorization::Deref(_, _, mc::Implicit(..)) |
+        Categorization::Deref(_, _, mc::UnsafePtr(..)) |
+        Categorization::StaticItem => {
             Some(cmt.clone())
         }
 
-        mc::cat_rvalue(..) |
-        mc::cat_local(..) |
-        mc::cat_upvar(..) => {
+        Categorization::Rvalue(..) |
+        Categorization::Local(..) |
+        Categorization::Upvar(..) => {
             None
         }
 
-        mc::cat_downcast(ref b, _) |
-        mc::cat_interior(ref b, mc::InteriorField(_)) |
-        mc::cat_interior(ref b, mc::InteriorElement(Kind::Pattern, _)) => {
+        Categorization::Downcast(ref b, _) |
+        Categorization::Interior(ref b, mc::InteriorField(_)) |
+        Categorization::Interior(ref b, mc::InteriorElement(Kind::Pattern, _)) => {
             match b.ty.sty {
-                ty::TyStruct(did, _) | ty::TyEnum(did, _) => {
-                    if bccx.tcx.has_dtor(did) {
+                ty::TyStruct(def, _) | ty::TyEnum(def, _) => {
+                    if def.has_dtor() {
                         Some(cmt.clone())
                     } else {
                         check_and_get_illegal_move_origin(bccx, b)
@@ -192,12 +194,12 @@ fn check_and_get_illegal_move_origin<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>,
             }
         }
 
-        mc::cat_interior(_, mc::InteriorElement(Kind::Index, _)) => {
+        Categorization::Interior(_, mc::InteriorElement(Kind::Index, _)) => {
             // Forbid move of arr[i] for arr: [T; 3]; see RFC 533.
             Some(cmt.clone())
         }
 
-        mc::cat_deref(ref b, _, mc::Unique) => {
+        Categorization::Deref(ref b, _, mc::Unique) => {
             check_and_get_illegal_move_origin(bccx, b)
         }
     }

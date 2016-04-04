@@ -21,15 +21,14 @@
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
-use core::prelude::*;
-
-use alloc::boxed::Box;
+use alloc::boxed::{Box, IntermediateBox};
 use core::cmp::Ordering;
 use core::fmt;
 use core::hash::{Hasher, Hash};
-use core::iter::{self, FromIterator};
+use core::iter::FromIterator;
 use core::mem;
-use core::ptr;
+use core::ops::{BoxPlace, InPlace, Place, Placer};
+use core::ptr::{self, Shared};
 
 /// A doubly-linked list.
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -42,12 +41,12 @@ pub struct LinkedList<T> {
 type Link<T> = Option<Box<Node<T>>>;
 
 struct Rawlink<T> {
-    p: *mut T,
+    p: Option<Shared<T>>,
 }
 
 impl<T> Copy for Rawlink<T> {}
-unsafe impl<T:Send> Send for Rawlink<T> {}
-unsafe impl<T:Sync> Sync for Rawlink<T> {}
+unsafe impl<T: Send> Send for Rawlink<T> {}
+unsafe impl<T: Sync> Sync for Rawlink<T> {}
 
 struct Node<T> {
     next: Link<T>,
@@ -57,7 +56,7 @@ struct Node<T> {
 
 /// An iterator over references to the items of a `LinkedList`.
 #[stable(feature = "rust1", since = "1.0.0")]
-pub struct Iter<'a, T:'a> {
+pub struct Iter<'a, T: 'a> {
     head: &'a Link<T>,
     tail: Rawlink<Node<T>>,
     nelem: usize,
@@ -77,30 +76,30 @@ impl<'a, T> Clone for Iter<'a, T> {
 
 /// An iterator over mutable references to the items of a `LinkedList`.
 #[stable(feature = "rust1", since = "1.0.0")]
-pub struct IterMut<'a, T:'a> {
+pub struct IterMut<'a, T: 'a> {
     list: &'a mut LinkedList<T>,
     head: Rawlink<Node<T>>,
     tail: Rawlink<Node<T>>,
     nelem: usize,
 }
 
-/// An iterator over mutable references to the items of a `LinkedList`.
+/// An iterator over the items of a `LinkedList`.
 #[derive(Clone)]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct IntoIter<T> {
-    list: LinkedList<T>
+    list: LinkedList<T>,
 }
 
 /// Rawlink is a type like Option<T> but for holding a raw pointer
 impl<T> Rawlink<T> {
     /// Like Option::None for Rawlink
     fn none() -> Rawlink<T> {
-        Rawlink{p: ptr::null_mut()}
+        Rawlink { p: None }
     }
 
     /// Like Option::Some for Rawlink
     fn some(n: &mut T) -> Rawlink<T> {
-        Rawlink{p: n}
+        unsafe { Rawlink { p: Some(Shared::new(n)) } }
     }
 
     /// Convert the `Rawlink` into an Option value
@@ -110,7 +109,7 @@ impl<T> Rawlink<T> {
     /// - Dereference of raw pointer.
     /// - Returns reference of arbitrary lifetime.
     unsafe fn resolve<'a>(&self) -> Option<&'a T> {
-        self.p.as_ref()
+        self.p.map(|p| &**p)
     }
 
     /// Convert the `Rawlink` into an Option value
@@ -120,7 +119,7 @@ impl<T> Rawlink<T> {
     /// - Dereference of raw pointer.
     /// - Returns reference of arbitrary lifetime.
     unsafe fn resolve_mut<'a>(&mut self) -> Option<&'a mut T> {
-        self.p.as_mut()
+        self.p.map(|p| &mut **p)
     }
 
     /// Return the `Rawlink` and replace with `Rawlink::none()`
@@ -141,13 +140,17 @@ impl<'a, T> From<&'a mut Link<T>> for Rawlink<Node<T>> {
 impl<T> Clone for Rawlink<T> {
     #[inline]
     fn clone(&self) -> Rawlink<T> {
-        Rawlink{p: self.p}
+        Rawlink { p: self.p }
     }
 }
 
 impl<T> Node<T> {
     fn new(v: T) -> Node<T> {
-        Node{value: v, next: None, prev: Rawlink::none()}
+        Node {
+            value: v,
+            next: None,
+            prev: Rawlink::none(),
+        }
     }
 
     /// Update the `prev` link on `next`, then set self's next pointer.
@@ -194,7 +197,7 @@ impl<T> LinkedList<T> {
             self.length -= 1;
             match front_node.next.take() {
                 Some(node) => self.list_head = link_no_prev(node),
-                None => self.list_tail = Rawlink::none()
+                None => self.list_tail = Rawlink::none(),
             }
             front_node
         })
@@ -222,7 +225,7 @@ impl<T> LinkedList<T> {
                 self.list_tail = tail.prev;
                 match tail.prev.resolve_mut() {
                     None => self.list_head.take(),
-                    Some(tail_prev) => tail_prev.next.take()
+                    Some(tail_prev) => tail_prev.next.take(),
                 }
             })
         }
@@ -232,8 +235,9 @@ impl<T> LinkedList<T> {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T> Default for LinkedList<T> {
     #[inline]
-    #[stable(feature = "rust1", since = "1.0.0")]
-    fn default() -> LinkedList<T> { LinkedList::new() }
+    fn default() -> LinkedList<T> {
+        LinkedList::new()
+    }
 }
 
 impl<T> LinkedList<T> {
@@ -241,7 +245,11 @@ impl<T> LinkedList<T> {
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn new() -> LinkedList<T> {
-        LinkedList{list_head: None, list_tail: Rawlink::none(), length: 0}
+        LinkedList {
+            list_head: None,
+            list_tail: Rawlink::none(),
+            length: 0,
+        }
     }
 
     /// Moves all elements from `other` to the end of the list.
@@ -277,7 +285,7 @@ impl<T> LinkedList<T> {
                 self.length = other.length;
                 self.list_head = other.list_head.take();
                 self.list_tail = other.list_tail.take();
-            },
+            }
             Some(tail) => {
                 // Carefully empty `other`.
                 let o_tail = other.list_tail.take();
@@ -299,7 +307,11 @@ impl<T> LinkedList<T> {
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn iter(&self) -> Iter<T> {
-        Iter{nelem: self.len(), head: &self.list_head, tail: self.list_tail}
+        Iter {
+            nelem: self.len(),
+            head: &self.list_head,
+            tail: self.list_tail,
+        }
     }
 
     /// Provides a forward iterator with mutable references.
@@ -310,7 +322,7 @@ impl<T> LinkedList<T> {
             nelem: self.len(),
             head: Rawlink::from(&mut self.list_head),
             tail: self.list_tail,
-            list: self
+            list: self,
         }
     }
 
@@ -455,9 +467,7 @@ impl<T> LinkedList<T> {
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn back(&self) -> Option<&T> {
-        unsafe {
-            self.list_tail.resolve().map(|tail| &tail.value)
-        }
+        unsafe { self.list_tail.resolve().map(|tail| &tail.value) }
     }
 
     /// Provides a mutable reference to the back element, or `None` if the list
@@ -484,9 +494,7 @@ impl<T> LinkedList<T> {
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn back_mut(&mut self) -> Option<&mut T> {
-        unsafe {
-            self.list_tail.resolve_mut().map(|tail| &mut tail.value)
-        }
+        unsafe { self.list_tail.resolve_mut().map(|tail| &mut tail.value) }
     }
 
     /// Adds an element first in the list.
@@ -535,7 +543,7 @@ impl<T> LinkedList<T> {
     ///
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn pop_front(&mut self) -> Option<T> {
-        self.pop_front_node().map(|box Node{value, ..}| value)
+        self.pop_front_node().map(|box Node { value, .. }| value)
     }
 
     /// Appends an element to the back of a list
@@ -571,7 +579,7 @@ impl<T> LinkedList<T> {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn pop_back(&mut self) -> Option<T> {
-        self.pop_back_node().map(|box Node{value, ..}| value)
+        self.pop_back_node().map(|box Node { value, .. }| value)
     }
 
     /// Splits the list into two at the given index. Returns everything after the given index,
@@ -620,7 +628,7 @@ impl<T> LinkedList<T> {
                 iter.next();
             }
             iter.head
-        }  else {
+        } else {
             // better off starting from the end
             let mut iter = self.iter_mut();
             for _ in 0..len - 1 - (at - 1) {
@@ -644,7 +652,7 @@ impl<T> LinkedList<T> {
         let second_part = LinkedList {
             list_head: second_part_head,
             list_tail: self.list_tail,
-            length: len - at
+            length: len - at,
         };
 
         // Fix the tail ptr of the first part
@@ -653,10 +661,61 @@ impl<T> LinkedList<T> {
 
         second_part
     }
+
+    /// Returns a place for insertion at the front of the list.
+    ///
+    /// Using this method with placement syntax is equivalent to [`push_front`]
+    /// (#method.push_front), but may be more efficient.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(collection_placement)]
+    /// #![feature(placement_in_syntax)]
+    ///
+    /// use std::collections::LinkedList;
+    ///
+    /// let mut list = LinkedList::new();
+    /// list.front_place() <- 2;
+    /// list.front_place() <- 4;
+    /// assert!(list.iter().eq(&[4, 2]));
+    /// ```
+    #[unstable(feature = "collection_placement",
+               reason = "method name and placement protocol are subject to change",
+               issue = "30172")]
+    pub fn front_place(&mut self) -> FrontPlace<T> {
+        FrontPlace { list: self, node: IntermediateBox::make_place() }
+    }
+
+    /// Returns a place for insertion at the back of the list.
+    ///
+    /// Using this method with placement syntax is equivalent to [`push_back`](#method.push_back),
+    /// but may be more efficient.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(collection_placement)]
+    /// #![feature(placement_in_syntax)]
+    ///
+    /// use std::collections::LinkedList;
+    ///
+    /// let mut list = LinkedList::new();
+    /// list.back_place() <- 2;
+    /// list.back_place() <- 4;
+    /// assert!(list.iter().eq(&[2, 4]));
+    /// ```
+    #[unstable(feature = "collection_placement",
+               reason = "method name and placement protocol are subject to change",
+               issue = "30172")]
+    pub fn back_place(&mut self) -> BackPlace<T> {
+        BackPlace { list: self, node: IntermediateBox::make_place() }
+    }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T> Drop for LinkedList<T> {
+    #[unsafe_destructor_blind_to_params]
     fn drop(&mut self) {
         // Dissolve the linked_list in a loop.
         // Just dropping the list_head can lead to stack exhaustion
@@ -762,7 +821,9 @@ impl<'a, A> IterMut<'a, A> {
         //
         // The inserted node will not appear in further iteration.
         match unsafe { self.head.resolve_mut() } {
-            None => { self.list.push_back_node(ins_node); }
+            None => {
+                self.list.push_back_node(ins_node);
+            }
             Some(node) => {
                 let prev_node = match unsafe { node.prev.resolve_mut() } {
                     None => return self.list.push_front_node(ins_node),
@@ -784,7 +845,8 @@ impl<'a, A> IterMut<'a, A> {
     /// # Examples
     ///
     /// ```
-    /// # #![feature(linked_list_extras)]
+    /// #![feature(linked_list_extras)]
+    ///
     /// use std::collections::LinkedList;
     ///
     /// let mut list: LinkedList<_> = vec![1, 3, 4].into_iter().collect();
@@ -802,7 +864,8 @@ impl<'a, A> IterMut<'a, A> {
     /// ```
     #[inline]
     #[unstable(feature = "linked_list_extras",
-               reason = "this is probably better handled by a cursor type -- we'll see")]
+               reason = "this is probably better handled by a cursor type -- we'll see",
+               issue = "27794")]
     pub fn insert_next(&mut self, elt: A) {
         self.insert_next_node(box Node::new(elt))
     }
@@ -812,7 +875,8 @@ impl<'a, A> IterMut<'a, A> {
     /// # Examples
     ///
     /// ```
-    /// # #![feature(linked_list_extras)]
+    /// #![feature(linked_list_extras)]
+    ///
     /// use std::collections::LinkedList;
     ///
     /// let mut list: LinkedList<_> = vec![1, 2, 3].into_iter().collect();
@@ -825,14 +889,13 @@ impl<'a, A> IterMut<'a, A> {
     /// ```
     #[inline]
     #[unstable(feature = "linked_list_extras",
-               reason = "this is probably better handled by a cursor type -- we'll see")]
+               reason = "this is probably better handled by a cursor type -- we'll see",
+               issue = "27794")]
     pub fn peek_next(&mut self) -> Option<&mut A> {
         if self.nelem == 0 {
-            return None
+            return None;
         }
-        unsafe {
-            self.head.resolve_mut().map(|head| &mut head.value)
-        }
+        unsafe { self.head.resolve_mut().map(|head| &mut head.value) }
     }
 }
 
@@ -841,7 +904,9 @@ impl<A> Iterator for IntoIter<A> {
     type Item = A;
 
     #[inline]
-    fn next(&mut self) -> Option<A> { self.list.pop_front() }
+    fn next(&mut self) -> Option<A> {
+        self.list.pop_front()
+    }
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -852,14 +917,17 @@ impl<A> Iterator for IntoIter<A> {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<A> DoubleEndedIterator for IntoIter<A> {
     #[inline]
-    fn next_back(&mut self) -> Option<A> { self.list.pop_back() }
+    fn next_back(&mut self) -> Option<A> {
+        self.list.pop_back()
+    }
 }
 
+#[stable(feature = "rust1", since = "1.0.0")]
 impl<A> ExactSizeIterator for IntoIter<A> {}
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<A> FromIterator<A> for LinkedList<A> {
-    fn from_iter<T: IntoIterator<Item=A>>(iter: T) -> LinkedList<A> {
+    fn from_iter<T: IntoIterator<Item = A>>(iter: T) -> LinkedList<A> {
         let mut ret = LinkedList::new();
         ret.extend(iter);
         ret
@@ -874,7 +942,7 @@ impl<T> IntoIterator for LinkedList<T> {
     /// Consumes the list into an iterator yielding elements by value.
     #[inline]
     fn into_iter(self) -> IntoIter<T> {
-        IntoIter{list: self}
+        IntoIter { list: self }
     }
 }
 
@@ -888,6 +956,7 @@ impl<'a, T> IntoIterator for &'a LinkedList<T> {
     }
 }
 
+#[stable(feature = "rust1", since = "1.0.0")]
 impl<'a, T> IntoIterator for &'a mut LinkedList<T> {
     type Item = &'a mut T;
     type IntoIter = IterMut<'a, T>;
@@ -899,14 +968,16 @@ impl<'a, T> IntoIterator for &'a mut LinkedList<T> {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<A> Extend<A> for LinkedList<A> {
-    fn extend<T: IntoIterator<Item=A>>(&mut self, iter: T) {
-        for elt in iter { self.push_back(elt); }
+    fn extend<T: IntoIterator<Item = A>>(&mut self, iter: T) {
+        for elt in iter {
+            self.push_back(elt);
+        }
     }
 }
 
 #[stable(feature = "extend_ref", since = "1.2.0")]
 impl<'a, T: 'a + Copy> Extend<&'a T> for LinkedList<T> {
-    fn extend<I: IntoIterator<Item=&'a T>>(&mut self, iter: I) {
+    fn extend<I: IntoIterator<Item = &'a T>>(&mut self, iter: I) {
         self.extend(iter.into_iter().cloned());
     }
 }
@@ -914,13 +985,11 @@ impl<'a, T: 'a + Copy> Extend<&'a T> for LinkedList<T> {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<A: PartialEq> PartialEq for LinkedList<A> {
     fn eq(&self, other: &LinkedList<A>) -> bool {
-        self.len() == other.len() &&
-            iter::order::eq(self.iter(), other.iter())
+        self.len() == other.len() && self.iter().eq(other.iter())
     }
 
     fn ne(&self, other: &LinkedList<A>) -> bool {
-        self.len() != other.len() ||
-            iter::order::ne(self.iter(), other.iter())
+        self.len() != other.len() || self.iter().ne(other.iter())
     }
 }
 
@@ -930,7 +999,7 @@ impl<A: Eq> Eq for LinkedList<A> {}
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<A: PartialOrd> PartialOrd for LinkedList<A> {
     fn partial_cmp(&self, other: &LinkedList<A>) -> Option<Ordering> {
-        iter::order::partial_cmp(self.iter(), other.iter())
+        self.iter().partial_cmp(other.iter())
     }
 }
 
@@ -938,7 +1007,7 @@ impl<A: PartialOrd> PartialOrd for LinkedList<A> {
 impl<A: Ord> Ord for LinkedList<A> {
     #[inline]
     fn cmp(&self, other: &LinkedList<A>) -> Ordering {
-        iter::order::cmp(self.iter(), other.iter())
+        self.iter().cmp(other.iter())
     }
 }
 
@@ -966,11 +1035,114 @@ impl<A: Hash> Hash for LinkedList<A> {
     }
 }
 
+unsafe fn finalize<T>(node: IntermediateBox<Node<T>>) -> Box<Node<T>> {
+    let mut node = node.finalize();
+    ptr::write(&mut node.next, None);
+    ptr::write(&mut node.prev, Rawlink::none());
+    node
+}
+
+/// A place for insertion at the front of a `LinkedList`.
+///
+/// See [`LinkedList::front_place`](struct.LinkedList.html#method.front_place) for details.
+#[must_use = "places do nothing unless written to with `<-` syntax"]
+#[unstable(feature = "collection_placement",
+           reason = "struct name and placement protocol are subject to change",
+           issue = "30172")]
+pub struct FrontPlace<'a, T: 'a> {
+    list: &'a mut LinkedList<T>,
+    node: IntermediateBox<Node<T>>,
+}
+
+#[unstable(feature = "collection_placement",
+           reason = "placement protocol is subject to change",
+           issue = "30172")]
+impl<'a, T> Placer<T> for FrontPlace<'a, T> {
+    type Place = Self;
+
+    fn make_place(self) -> Self {
+        self
+    }
+}
+
+#[unstable(feature = "collection_placement",
+           reason = "placement protocol is subject to change",
+           issue = "30172")]
+impl<'a, T> Place<T> for FrontPlace<'a, T> {
+    fn pointer(&mut self) -> *mut T {
+        unsafe { &mut (*self.node.pointer()).value }
+    }
+}
+
+#[unstable(feature = "collection_placement",
+           reason = "placement protocol is subject to change",
+           issue = "30172")]
+impl<'a, T> InPlace<T> for FrontPlace<'a, T> {
+    type Owner = ();
+
+    unsafe fn finalize(self) {
+        let FrontPlace { list, node } = self;
+        list.push_front_node(finalize(node));
+    }
+}
+
+/// A place for insertion at the back of a `LinkedList`.
+///
+/// See [`LinkedList::back_place`](struct.LinkedList.html#method.back_place) for details.
+#[must_use = "places do nothing unless written to with `<-` syntax"]
+#[unstable(feature = "collection_placement",
+           reason = "struct name and placement protocol are subject to change",
+           issue = "30172")]
+pub struct BackPlace<'a, T: 'a> {
+    list: &'a mut LinkedList<T>,
+    node: IntermediateBox<Node<T>>,
+}
+
+#[unstable(feature = "collection_placement",
+           reason = "placement protocol is subject to change",
+           issue = "30172")]
+impl<'a, T> Placer<T> for BackPlace<'a, T> {
+    type Place = Self;
+
+    fn make_place(self) -> Self {
+        self
+    }
+}
+
+#[unstable(feature = "collection_placement",
+           reason = "placement protocol is subject to change",
+           issue = "30172")]
+impl<'a, T> Place<T> for BackPlace<'a, T> {
+    fn pointer(&mut self) -> *mut T {
+        unsafe { &mut (*self.node.pointer()).value }
+    }
+}
+
+#[unstable(feature = "collection_placement",
+           reason = "placement protocol is subject to change",
+           issue = "30172")]
+impl<'a, T> InPlace<T> for BackPlace<'a, T> {
+    type Owner = ();
+
+    unsafe fn finalize(self) {
+        let BackPlace { list, node } = self;
+        list.push_back_node(finalize(node));
+    }
+}
+
+// Ensure that `LinkedList` and its read-only iterators are covariant in their type parameters.
+#[allow(dead_code)]
+fn assert_covariance() {
+    fn a<'a>(x: LinkedList<&'static str>) -> LinkedList<&'a str> { x }
+    fn b<'i, 'a>(x: Iter<'i, &'static str>) -> Iter<'i, &'a str> { x }
+    fn c<'a>(x: IntoIter<&'static str>) -> IntoIter<&'a str> { x }
+}
+
 #[cfg(test)]
 mod tests {
     use std::clone::Clone;
     use std::iter::{Iterator, IntoIterator, Extend};
-    use std::option::Option::{Some, None, self};
+    use std::option::Option::{self, Some, None};
     use std::__rand::{thread_rng, Rng};
     use std::thread;
     use std::vec::Vec;
@@ -987,13 +1159,16 @@ mod tests {
         let mut last_ptr: Option<&Node<T>> = None;
         let mut node_ptr: &Node<T>;
         match list.list_head {
-            None => { assert_eq!(0, list.length); return }
+            None => {
+                assert_eq!(0, list.length);
+                return;
+            }
             Some(ref node) => node_ptr = &**node,
         }
         loop {
             match unsafe { (last_ptr, node_ptr.prev.resolve()) } {
-                (None   , None      ) => {}
-                (None   , _         ) => panic!("prev link for list_head"),
+                (None, None) => {}
+                (None, _) => panic!("prev link for list_head"),
                 (Some(p), Some(pptr)) => {
                     assert_eq!(p as *const Node<T>, pptr as *const Node<T>);
                 }
@@ -1050,14 +1225,14 @@ mod tests {
         }
 
         // Non-empty to non-empty
-        let v = vec![1,2,3,4,5];
-        let u = vec![9,8,1,2,3,4,5];
+        let v = vec![1, 2, 3, 4, 5];
+        let u = vec![9, 8, 1, 2, 3, 4, 5];
         let mut m = list_from(&v);
         let mut n = list_from(&u);
         m.append(&mut n);
         check_links(&m);
         let mut sum = v;
-        sum.push_all(&u);
+        sum.extend_from_slice(&u);
         assert_eq!(sum.len(), m.len());
         for elt in sum {
             assert_eq!(m.pop_front(), Some(elt))
@@ -1073,7 +1248,7 @@ mod tests {
 
     #[test]
     fn test_insert_prev() {
-        let mut m = list_from(&[0,2,4,6,8]);
+        let mut m = list_from(&[0, 2, 4, 6, 8]);
         let len = m.len();
         {
             let mut it = m.iter_mut();
@@ -1095,17 +1270,21 @@ mod tests {
         }
         check_links(&m);
         assert_eq!(m.len(), 3 + len * 2);
-        assert_eq!(m.into_iter().collect::<Vec<_>>(), [-2,0,1,2,3,4,5,6,7,8,9,0,1]);
+        assert_eq!(m.into_iter().collect::<Vec<_>>(),
+                   [-2, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1]);
     }
 
     #[test]
     fn test_send() {
-        let n = list_from(&[1,2,3]);
+        let n = list_from(&[1, 2, 3]);
         thread::spawn(move || {
             check_links(&n);
-            let a: &[_] = &[&1,&2,&3];
+            let a: &[_] = &[&1, &2, &3];
             assert_eq!(a, &n.iter().collect::<Vec<_>>()[..]);
-        }).join().ok().unwrap();
+        })
+            .join()
+            .ok()
+            .unwrap();
     }
 
     #[test]
@@ -1126,10 +1305,10 @@ mod tests {
         //
         // https://github.com/rust-lang/rust/issues/26021
         let mut v1 = LinkedList::new();
-        v1.push_front(1u8);
-        v1.push_front(1u8);
-        v1.push_front(1u8);
-        v1.push_front(1u8);
+        v1.push_front(1);
+        v1.push_front(1);
+        v1.push_front(1);
+        v1.push_front(1);
         let _ = v1.split_off(3); // Dropping this now should not cause laundry consumption
         assert_eq!(v1.len(), 3);
 
@@ -1140,10 +1319,10 @@ mod tests {
     #[test]
     fn test_split_off() {
         let mut v1 = LinkedList::new();
-        v1.push_front(1u8);
-        v1.push_front(1u8);
-        v1.push_front(1u8);
-        v1.push_front(1u8);
+        v1.push_front(1);
+        v1.push_front(1);
+        v1.push_front(1);
+        v1.push_front(1);
 
         // test all splits
         for ix in 0..1 + v1.len() {
@@ -1175,7 +1354,7 @@ mod tests {
                         v.remove(0);
                     }
                 }
-                2 | 4 =>  {
+                2 | 4 => {
                     m.push_front(-i);
                     v.insert(0, -i);
                 }

@@ -14,18 +14,18 @@ use super::{CandidateSource, ImplSource, TraitSource};
 use super::suggest;
 
 use check;
-use check::{FnCtxt, NoPreference, UnresolvedTypeAction};
-use middle::fast_reject;
-use middle::subst;
-use middle::subst::Subst;
-use middle::traits;
-use middle::ty::{self, RegionEscape, Ty, ToPolyTraitRef, TraitRef};
-use middle::ty::HasTypeFlags;
-use middle::ty_fold::TypeFoldable;
-use middle::infer;
-use middle::infer::InferCtxt;
+use check::{FnCtxt, UnresolvedTypeAction};
+use middle::def_id::DefId;
+use middle::def::Def;
+use rustc::ty::subst;
+use rustc::ty::subst::Subst;
+use rustc::traits;
+use rustc::ty::{self, NoPreference, Ty, TyCtxt, ToPolyTraitRef, TraitRef, TypeFoldable};
+use rustc::infer;
+use rustc::infer::{InferCtxt, TypeOrigin};
 use syntax::ast;
 use syntax::codemap::{Span, DUMMY_SP};
+use rustc_front::hir;
 use std::collections::HashSet;
 use std::mem;
 use std::rc::Rc;
@@ -39,14 +39,17 @@ struct ProbeContext<'a, 'tcx:'a> {
     mode: Mode,
     item_name: ast::Name,
     steps: Rc<Vec<CandidateStep<'tcx>>>,
-    opt_simplified_steps: Option<Vec<fast_reject::SimplifiedType>>,
+    opt_simplified_steps: Option<Vec<ty::fast_reject::SimplifiedType>>,
     inherent_candidates: Vec<Candidate<'tcx>>,
     extension_candidates: Vec<Candidate<'tcx>>,
-    impl_dups: HashSet<ast::DefId>,
+    impl_dups: HashSet<DefId>,
 
     /// Collects near misses when the candidate functions are missing a `self` keyword and is only
     /// used for error reporting
     static_candidates: Vec<CandidateSource>,
+
+    /// Some(candidate) if there is a private candidate
+    private_candidate: Option<Def>,
 
     /// Collects near misses when trait bounds for type parameters are unsatisfied and is only used
     /// for error reporting
@@ -71,7 +74,7 @@ struct Candidate<'tcx> {
 enum CandidateKind<'tcx> {
     InherentImplCandidate(subst::Substs<'tcx>,
                           /* Normalize obligations */ Vec<traits::PredicateObligation<'tcx>>),
-    ExtensionImplCandidate(/* Impl */ ast::DefId, subst::Substs<'tcx>,
+    ExtensionImplCandidate(/* Impl */ DefId, subst::Substs<'tcx>,
                            /* Normalize obligations */ Vec<traits::PredicateObligation<'tcx>>),
     ObjectCandidate,
     TraitCandidate,
@@ -91,7 +94,7 @@ pub struct Pick<'tcx> {
     // Indicates that an autoref is applied after the optional autoderefs
     //
     // B = A | &A | &mut A
-    pub autoref: Option<ast::Mutability>,
+    pub autoref: Option<hir::Mutability>,
 
     // Indicates that the source expression should be "unsized" to a
     // target type. This should probably eventually go away in favor
@@ -104,7 +107,7 @@ pub struct Pick<'tcx> {
 #[derive(Clone,Debug)]
 pub enum PickKind<'tcx> {
     InherentImplPick,
-    ExtensionImplPick(/* Impl */ ast::DefId),
+    ExtensionImplPick(/* Impl */ DefId),
     ObjectPick,
     TraitPick,
     WhereClausePick(/* Trait */ ty::PolyTraitRef<'tcx>),
@@ -161,7 +164,7 @@ pub fn probe<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
     // Create a list of simplified self types, if we can.
     let mut simplified_steps = Vec::new();
     for step in &steps {
-        match fast_reject::simplify_type(fcx.tcx(), step.self_ty, true) {
+        match ty::fast_reject::simplify_type(fcx.tcx(), step.self_ty, true) {
             None => { break; }
             Some(simplified_type) => { simplified_steps.push(simplified_type); }
         }
@@ -187,7 +190,7 @@ pub fn probe<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
                                              steps,
                                              opt_simplified_steps);
         probe_cx.assemble_inherent_candidates();
-        try!(probe_cx.assemble_extension_candidates_for_traits_in_scope(scope_expr_id));
+        probe_cx.assemble_extension_candidates_for_traits_in_scope(scope_expr_id)?;
         probe_cx.pick()
     })
 }
@@ -201,7 +204,7 @@ fn create_steps<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
     let (final_ty, dereferences, _) = check::autoderef(fcx,
                                                        span,
                                                        self_ty,
-                                                       None,
+                                                       || None,
                                                        UnresolvedTypeAction::Error,
                                                        NoPreference,
                                                        |t, d| {
@@ -234,7 +237,7 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
            mode: Mode,
            item_name: ast::Name,
            steps: Vec<CandidateStep<'tcx>>,
-           opt_simplified_steps: Option<Vec<fast_reject::SimplifiedType>>)
+           opt_simplified_steps: Option<Vec<ty::fast_reject::SimplifiedType>>)
            -> ProbeContext<'a,'tcx>
     {
         ProbeContext {
@@ -248,6 +251,7 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
             steps: Rc::new(steps),
             opt_simplified_steps: opt_simplified_steps,
             static_candidates: Vec::new(),
+            private_candidate: None,
             unsatisfied_predicates: Vec::new(),
         }
     }
@@ -257,9 +261,10 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
         self.extension_candidates.clear();
         self.impl_dups.clear();
         self.static_candidates.clear();
+        self.private_candidate = None;
     }
 
-    fn tcx(&self) -> &'a ty::ctxt<'tcx> {
+    fn tcx(&self) -> &'a TyCtxt<'tcx> {
         self.fcx.tcx()
     }
 
@@ -286,10 +291,9 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
                 self.assemble_inherent_candidates_from_object(self_ty, data);
                 self.assemble_inherent_impl_candidates_for_type(data.principal_def_id());
             }
-            ty::TyEnum(did, _) |
-            ty::TyStruct(did, _) |
-            ty::TyClosure(did, _) => {
-                self.assemble_inherent_impl_candidates_for_type(did);
+            ty::TyEnum(def, _) |
+            ty::TyStruct(def, _) => {
+                self.assemble_inherent_impl_candidates_for_type(def.did);
             }
             ty::TyBox(_) => {
                 if let Some(box_did) = self.tcx().lang_items.owned_box() {
@@ -311,59 +315,59 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
                 let lang_def_id = self.tcx().lang_items.slice_impl();
                 self.assemble_inherent_impl_for_primitive(lang_def_id);
             }
-            ty::TyRawPtr(ty::TypeAndMut { ty: _, mutbl: ast::MutImmutable }) => {
+            ty::TyRawPtr(ty::TypeAndMut { ty: _, mutbl: hir::MutImmutable }) => {
                 let lang_def_id = self.tcx().lang_items.const_ptr_impl();
                 self.assemble_inherent_impl_for_primitive(lang_def_id);
             }
-            ty::TyRawPtr(ty::TypeAndMut { ty: _, mutbl: ast::MutMutable }) => {
+            ty::TyRawPtr(ty::TypeAndMut { ty: _, mutbl: hir::MutMutable }) => {
                 let lang_def_id = self.tcx().lang_items.mut_ptr_impl();
                 self.assemble_inherent_impl_for_primitive(lang_def_id);
             }
-            ty::TyInt(ast::TyI8) => {
+            ty::TyInt(ast::IntTy::I8) => {
                 let lang_def_id = self.tcx().lang_items.i8_impl();
                 self.assemble_inherent_impl_for_primitive(lang_def_id);
             }
-            ty::TyInt(ast::TyI16) => {
+            ty::TyInt(ast::IntTy::I16) => {
                 let lang_def_id = self.tcx().lang_items.i16_impl();
                 self.assemble_inherent_impl_for_primitive(lang_def_id);
             }
-            ty::TyInt(ast::TyI32) => {
+            ty::TyInt(ast::IntTy::I32) => {
                 let lang_def_id = self.tcx().lang_items.i32_impl();
                 self.assemble_inherent_impl_for_primitive(lang_def_id);
             }
-            ty::TyInt(ast::TyI64) => {
+            ty::TyInt(ast::IntTy::I64) => {
                 let lang_def_id = self.tcx().lang_items.i64_impl();
                 self.assemble_inherent_impl_for_primitive(lang_def_id);
             }
-            ty::TyInt(ast::TyIs) => {
+            ty::TyInt(ast::IntTy::Is) => {
                 let lang_def_id = self.tcx().lang_items.isize_impl();
                 self.assemble_inherent_impl_for_primitive(lang_def_id);
             }
-            ty::TyUint(ast::TyU8) => {
+            ty::TyUint(ast::UintTy::U8) => {
                 let lang_def_id = self.tcx().lang_items.u8_impl();
                 self.assemble_inherent_impl_for_primitive(lang_def_id);
             }
-            ty::TyUint(ast::TyU16) => {
+            ty::TyUint(ast::UintTy::U16) => {
                 let lang_def_id = self.tcx().lang_items.u16_impl();
                 self.assemble_inherent_impl_for_primitive(lang_def_id);
             }
-            ty::TyUint(ast::TyU32) => {
+            ty::TyUint(ast::UintTy::U32) => {
                 let lang_def_id = self.tcx().lang_items.u32_impl();
                 self.assemble_inherent_impl_for_primitive(lang_def_id);
             }
-            ty::TyUint(ast::TyU64) => {
+            ty::TyUint(ast::UintTy::U64) => {
                 let lang_def_id = self.tcx().lang_items.u64_impl();
                 self.assemble_inherent_impl_for_primitive(lang_def_id);
             }
-            ty::TyUint(ast::TyUs) => {
+            ty::TyUint(ast::UintTy::Us) => {
                 let lang_def_id = self.tcx().lang_items.usize_impl();
                 self.assemble_inherent_impl_for_primitive(lang_def_id);
             }
-            ty::TyFloat(ast::TyF32) => {
+            ty::TyFloat(ast::FloatTy::F32) => {
                 let lang_def_id = self.tcx().lang_items.f32_impl();
                 self.assemble_inherent_impl_for_primitive(lang_def_id);
             }
-            ty::TyFloat(ast::TyF64) => {
+            ty::TyFloat(ast::FloatTy::F64) => {
                 let lang_def_id = self.tcx().lang_items.f64_impl();
                 self.assemble_inherent_impl_for_primitive(lang_def_id);
             }
@@ -372,7 +376,7 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
         }
     }
 
-    fn assemble_inherent_impl_for_primitive(&mut self, lang_def_id: Option<ast::DefId>) {
+    fn assemble_inherent_impl_for_primitive(&mut self, lang_def_id: Option<DefId>) {
         if let Some(impl_def_id) = lang_def_id {
             self.tcx().populate_implementations_for_primitive_if_necessary(impl_def_id);
 
@@ -380,7 +384,7 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
         }
     }
 
-    fn assemble_inherent_impl_candidates_for_type(&mut self, def_id: ast::DefId) {
+    fn assemble_inherent_impl_candidates_for_type(&mut self, def_id: DefId) {
         // Read the inherent implementation candidates for this type from the
         // metadata if necessary.
         self.tcx().populate_inherent_implementations_for_type_if_necessary(def_id);
@@ -392,7 +396,7 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
         }
     }
 
-    fn assemble_inherent_impl_probe(&mut self, impl_def_id: ast::DefId) {
+    fn assemble_inherent_impl_probe(&mut self, impl_def_id: DefId) {
         if !self.impl_dups.insert(impl_def_id) {
             return; // already visited
         }
@@ -407,6 +411,11 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
         if !self.has_applicable_self(&item) {
             // No receiver declared. Not a candidate.
             return self.record_static_candidate(ImplSource(impl_def_id));
+        }
+
+        if item.vis() != hir::Public && !self.fcx.private_item_is_visible(item.def_id()) {
+            self.private_candidate = Some(item.def());
+            return
         }
 
         let (impl_ty, impl_substs) = self.impl_ty_and_substs(impl_def_id);
@@ -481,6 +490,8 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
                     ty::Predicate::Equate(..) |
                     ty::Predicate::Projection(..) |
                     ty::Predicate::RegionOutlives(..) |
+                    ty::Predicate::WellFormed(..) |
+                    ty::Predicate::ObjectSafe(..) |
                     ty::Predicate::TypeOutlives(..) => {
                         None
                     }
@@ -505,11 +516,11 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
                 assert_eq!(m.generics.types.get_slice(subst::TypeSpace).len(),
                            trait_ref.substs.types.get_slice(subst::TypeSpace).len());
                 assert_eq!(m.generics.regions.get_slice(subst::TypeSpace).len(),
-                           trait_ref.substs.regions().get_slice(subst::TypeSpace).len());
+                           trait_ref.substs.regions.get_slice(subst::TypeSpace).len());
                 assert_eq!(m.generics.types.get_slice(subst::SelfSpace).len(),
                            trait_ref.substs.types.get_slice(subst::SelfSpace).len());
                 assert_eq!(m.generics.regions.get_slice(subst::SelfSpace).len(),
-                           trait_ref.substs.regions().get_slice(subst::SelfSpace).len());
+                           trait_ref.substs.regions.get_slice(subst::SelfSpace).len());
             }
 
             // Because this trait derives from a where-clause, it
@@ -568,7 +579,7 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
         if let Some(applicable_traits) = opt_applicable_traits {
             for &trait_did in applicable_traits {
                 if duplicates.insert(trait_did) {
-                    try!(self.assemble_extension_candidates_for_trait(trait_did));
+                    self.assemble_extension_candidates_for_trait(trait_did)?;
                 }
             }
         }
@@ -579,14 +590,14 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
         let mut duplicates = HashSet::new();
         for trait_info in suggest::all_traits(self.fcx.ccx) {
             if duplicates.insert(trait_info.def_id) {
-                try!(self.assemble_extension_candidates_for_trait(trait_info.def_id));
+                self.assemble_extension_candidates_for_trait(trait_info.def_id)?;
             }
         }
         Ok(())
     }
 
     fn assemble_extension_candidates_for_trait(&mut self,
-                                               trait_def_id: ast::DefId)
+                                               trait_def_id: DefId)
                                                -> Result<(), MethodError<'tcx>>
     {
         debug!("assemble_extension_candidates_for_trait(trait_def_id={:?})",
@@ -612,7 +623,7 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
 
         self.assemble_extension_candidates_for_trait_impls(trait_def_id, item.clone());
 
-        try!(self.assemble_closure_candidates(trait_def_id, item.clone()));
+        self.assemble_closure_candidates(trait_def_id, item.clone())?;
 
         self.assemble_projection_candidates(trait_def_id, item.clone());
 
@@ -622,7 +633,7 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
     }
 
     fn assemble_extension_candidates_for_trait_impls(&mut self,
-                                                     trait_def_id: ast::DefId,
+                                                     trait_def_id: DefId,
                                                      item: ty::ImplOrTraitItem<'tcx>)
     {
         let trait_def = self.tcx().lookup_trait_def(trait_def_id);
@@ -673,7 +684,7 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
         });
     }
 
-    fn impl_can_possibly_match(&self, impl_def_id: ast::DefId) -> bool {
+    fn impl_can_possibly_match(&self, impl_def_id: DefId) -> bool {
         let simplified_steps = match self.opt_simplified_steps {
             Some(ref simplified_steps) => simplified_steps,
             None => { return true; }
@@ -681,7 +692,7 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
 
         let impl_type = self.tcx().lookup_item_type(impl_def_id);
         let impl_simplified_type =
-            match fast_reject::simplify_type(self.tcx(), impl_type.ty, false) {
+            match ty::fast_reject::simplify_type(self.tcx(), impl_type.ty, false) {
                 Some(simplified_type) => simplified_type,
                 None => { return true; }
             };
@@ -690,18 +701,18 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
     }
 
     fn assemble_closure_candidates(&mut self,
-                                   trait_def_id: ast::DefId,
+                                   trait_def_id: DefId,
                                    item: ty::ImplOrTraitItem<'tcx>)
                                    -> Result<(), MethodError<'tcx>>
     {
         // Check if this is one of the Fn,FnMut,FnOnce traits.
         let tcx = self.tcx();
         let kind = if Some(trait_def_id) == tcx.lang_items.fn_trait() {
-            ty::FnClosureKind
+            ty::ClosureKind::Fn
         } else if Some(trait_def_id) == tcx.lang_items.fn_mut_trait() {
-            ty::FnMutClosureKind
+            ty::ClosureKind::FnMut
         } else if Some(trait_def_id) == tcx.lang_items.fn_once_trait() {
-            ty::FnOnceClosureKind
+            ty::ClosureKind::FnOnce
         } else {
             return Ok(());
         };
@@ -751,7 +762,7 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
     }
 
     fn assemble_projection_candidates(&mut self,
-                                      trait_def_id: ast::DefId,
+                                      trait_def_id: DefId,
                                       item: ty::ImplOrTraitItem<'tcx>)
     {
         debug!("assemble_projection_candidates(\
@@ -808,7 +819,7 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
     }
 
     fn assemble_where_clause_candidates(&mut self,
-                                        trait_def_id: ast::DefId,
+                                        trait_def_id: DefId,
                                         item: ty::ImplOrTraitItem<'tcx>)
     {
         debug!("assemble_where_clause_candidates(trait_def_id={:?})",
@@ -846,6 +857,7 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
         }
 
         let static_candidates = mem::replace(&mut self.static_candidates, vec![]);
+        let private_candidate = mem::replace(&mut self.private_candidate, None);
         let unsatisfied_predicates = mem::replace(&mut self.unsatisfied_predicates, vec![]);
 
         // things failed, so lets look at all traits, for diagnostic purposes now:
@@ -854,7 +866,7 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
         let span = self.span;
         let tcx = self.tcx();
 
-        try!(self.assemble_extension_candidates_for_all_traits());
+        self.assemble_extension_candidates_for_all_traits()?;
 
         let out_of_scope_traits = match self.pick_core() {
             Some(Ok(p)) => vec![p.item.container().id()],
@@ -865,8 +877,8 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
                         match tcx.trait_id_of_impl(impl_id) {
                             Some(id) => id,
                             None =>
-                                tcx.sess.span_bug(span,
-                                                  "found inherent method when looking at traits")
+                                span_bug!(span,
+                                          "found inherent method when looking at traits")
                         }
                     }
                 }
@@ -877,10 +889,14 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
             }
             Some(Err(MethodError::ClosureAmbiguity(..))) => {
                 // this error only occurs when assembling candidates
-                tcx.sess.span_bug(span, "encountered ClosureAmbiguity from pick_core");
+                span_bug!(span, "encountered ClosureAmbiguity from pick_core");
             }
-            None => vec![],
+            _ => vec![],
         };
+
+        if let Some(def) = private_candidate {
+            return Err(MethodError::PrivateMatch(def));
+        }
 
         Err(MethodError::NoMatch(NoMatchData::new(static_candidates, unsatisfied_predicates,
                                                   out_of_scope_traits, self.mode)))
@@ -950,7 +966,7 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
         let region = tcx.mk_region(ty::ReStatic);
 
         // Search through mutabilities in order to find one where pick works:
-        [ast::MutImmutable, ast::MutMutable].iter().filter_map(|&m| {
+        [hir::MutImmutable, hir::MutMutable].iter().filter_map(|&m| {
             let autoref_ty = tcx.mk_ref(region, ty::TypeAndMut {
                 ty: step.self_ty,
                 mutbl: m
@@ -1050,7 +1066,7 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
                     (impl_def_id, substs, ref_obligations)
                 }
 
-                ObjectCandidate(..) |
+                ObjectCandidate |
                 TraitCandidate |
                 WhereClauseCandidate(..) => {
                     // These have no additional conditions to check.
@@ -1134,7 +1150,7 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
     // MISCELLANY
 
     fn make_sub_ty(&self, sub: Ty<'tcx>, sup: Ty<'tcx>) -> infer::UnitResult<'tcx> {
-        self.infcx().sub_types(false, infer::Misc(DUMMY_SP), sub, sup)
+        self.infcx().sub_types(false, TypeOrigin::Misc(DUMMY_SP), sub, sup)
     }
 
     fn has_applicable_self(&self, item: &ty::ImplOrTraitItem) -> bool {
@@ -1142,10 +1158,10 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
         match *item {
             ty::ImplOrTraitItem::MethodTraitItem(ref method) =>
                 match method.explicit_self {
-                    ty::StaticExplicitSelfCategory => self.mode == Mode::Path,
-                    ty::ByValueExplicitSelfCategory |
-                    ty::ByReferenceExplicitSelfCategory(..) |
-                    ty::ByBoxExplicitSelfCategory => true,
+                    ty::ExplicitSelfCategory::Static => self.mode == Mode::Path,
+                    ty::ExplicitSelfCategory::ByValue |
+                    ty::ExplicitSelfCategory::ByReference(..) |
+                    ty::ExplicitSelfCategory::ByBox => true,
                 },
             ty::ImplOrTraitItem::ConstTraitItem(..) => self.mode == Mode::Path,
             _ => false,
@@ -1194,7 +1210,7 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
         // method yet. So create fresh variables here for those too,
         // if there are any.
         assert_eq!(substs.types.len(subst::FnSpace), 0);
-        assert_eq!(substs.regions().len(subst::FnSpace), 0);
+        assert_eq!(substs.regions.len(subst::FnSpace), 0);
 
         if self.mode == Mode::Path {
             return impl_ty;
@@ -1236,7 +1252,7 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
 
     /// Get the type of an impl and generate substitutions with placeholders.
     fn impl_ty_and_substs(&self,
-                          impl_def_id: ast::DefId)
+                          impl_def_id: DefId)
                           -> (Ty<'tcx>, subst::Substs<'tcx>)
     {
         let impl_pty = self.tcx().lookup_item_type(impl_def_id);
@@ -1278,8 +1294,8 @@ impl<'a,'tcx> ProbeContext<'a,'tcx> {
     }
 }
 
-fn impl_item<'tcx>(tcx: &ty::ctxt<'tcx>,
-                   impl_def_id: ast::DefId,
+fn impl_item<'tcx>(tcx: &TyCtxt<'tcx>,
+                   impl_def_id: DefId,
                    item_name: ast::Name)
                    -> Option<ty::ImplOrTraitItem<'tcx>>
 {
@@ -1293,8 +1309,8 @@ fn impl_item<'tcx>(tcx: &ty::ctxt<'tcx>,
 
 /// Find item with name `item_name` defined in `trait_def_id`
 /// and return it, or `None`, if no such item.
-fn trait_item<'tcx>(tcx: &ty::ctxt<'tcx>,
-                    trait_def_id: ast::DefId,
+fn trait_item<'tcx>(tcx: &TyCtxt<'tcx>,
+                    trait_def_id: DefId,
                     item_name: ast::Name)
                     -> Option<ty::ImplOrTraitItem<'tcx>>
 {

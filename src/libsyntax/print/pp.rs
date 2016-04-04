@@ -11,8 +11,10 @@
 //! This pretty-printer is a direct reimplementation of Philip Karlton's
 //! Mesa pretty-printer, as described in appendix A of
 //!
-//!     STAN-CS-79-770: "Pretty Printing", by Derek C. Oppen.
-//!     Stanford Department of Computer Science, 1979.
+//! ````ignore
+//! STAN-CS-79-770: "Pretty Printing", by Derek C. Oppen.
+//! Stanford Department of Computer Science, 1979.
+//! ````
 //!
 //! The algorithm's aim is to break a stream into as few lines as possible
 //! while respecting the indentation-consistency requirements of the enclosing
@@ -166,8 +168,8 @@ pub fn mk_printer<'a>(out: Box<io::Write+'a>, linewidth: usize) -> Printer<'a> {
     let n: usize = 3 * linewidth;
     debug!("mk_printer {}", linewidth);
     let token = vec![Token::Eof; n];
-    let size = vec![0_isize; n];
-    let scan_stack = vec![0_usize; n];
+    let size = vec![0; n];
+    let scan_stack = vec![0; n];
     Printer {
         out: out,
         buf_len: n,
@@ -316,7 +318,7 @@ impl<'a> Printer<'a> {
           Token::Eof => {
             if !self.scan_stack_empty {
                 self.check_stack(0);
-                try!(self.advance_left());
+                self.advance_left()?;
             }
             self.indent(0);
             Ok(())
@@ -397,9 +399,9 @@ impl<'a> Printer<'a> {
                     self.size[scanned] = SIZE_INFINITY;
                 }
             }
-            try!(self.advance_left());
+            self.advance_left()?;
             if self.left != self.right {
-                try!(self.check_stream());
+                self.check_stream()?;
             }
         }
         Ok(())
@@ -462,7 +464,7 @@ impl<'a> Printer<'a> {
                 _ => 0
             };
 
-            try!(self.print(left, left_size));
+            self.print(left, left_size)?;
 
             self.left_total += len;
 
@@ -530,7 +532,7 @@ impl<'a> Printer<'a> {
     }
     pub fn print_str(&mut self, s: &str) -> io::Result<()> {
         while self.pending_indentation > 0 {
-            try!(write!(self.out, " "));
+            write!(self.out, " ")?;
             self.pending_indentation -= 1;
         }
         write!(self.out, "{}", s)

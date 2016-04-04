@@ -45,6 +45,7 @@ extern char *yytext;
 %token DOTDOTDOT
 %token MOD_SEP
 %token RARROW
+%token LARROW
 %token FAT_ARROW
 %token LIT_BYTE
 %token LIT_CHAR
@@ -52,8 +53,8 @@ extern char *yytext;
 %token LIT_FLOAT
 %token LIT_STR
 %token LIT_STR_RAW
-%token LIT_BINARY
-%token LIT_BINARY_RAW
+%token LIT_BYTE_STR
+%token LIT_BYTE_STR_RAW
 %token IDENT
 %token UNDERSCORE
 %token LIFETIME
@@ -167,7 +168,8 @@ extern char *yytext;
 // prefix_exprs
 %precedence RETURN
 
-%left '=' SHLEQ SHREQ MINUSEQ ANDEQ OREQ PLUSEQ STAREQ SLASHEQ CARETEQ PERCENTEQ
+%right '=' SHLEQ SHREQ MINUSEQ ANDEQ OREQ PLUSEQ STAREQ SLASHEQ CARETEQ PERCENTEQ
+%right LARROW
 %left OROR
 %left ANDAND
 %left EQEQ NE
@@ -472,6 +474,7 @@ visibility
 
 idents_or_self
 : ident_or_self                    { $$ = mk_node("IdentsOrSelf", 1, $1); }
+| ident_or_self AS ident           { $$ = mk_node("IdentsOrSelf", 2, $1, $3); }
 | idents_or_self ',' ident_or_self { $$ = ext_node($1, 1, $3); }
 ;
 
@@ -1315,6 +1318,7 @@ nonblock_expr
 | RETURN expr                                                   { $$ = mk_node("ExprRet", 1, $2); }
 | BREAK                                                         { $$ = mk_node("ExprBreak", 0); }
 | BREAK lifetime                                                { $$ = mk_node("ExprBreak", 1, $2); }
+| nonblock_expr LARROW expr                                     { $$ = mk_node("ExprInPlace", 2, $1, $3); }
 | nonblock_expr '=' expr                                        { $$ = mk_node("ExprAssign", 2, $1, $3); }
 | nonblock_expr SHLEQ expr                                      { $$ = mk_node("ExprAssignShl", 2, $1, $3); }
 | nonblock_expr SHREQ expr                                      { $$ = mk_node("ExprAssignShr", 2, $1, $3); }
@@ -1374,6 +1378,7 @@ expr
 | RETURN expr                                         { $$ = mk_node("ExprRet", 1, $2); }
 | BREAK                                               { $$ = mk_node("ExprBreak", 0); }
 | BREAK ident                                         { $$ = mk_node("ExprBreak", 1, $2); }
+| expr LARROW expr                                    { $$ = mk_node("ExprInPlace", 2, $1, $3); }
 | expr '=' expr                                       { $$ = mk_node("ExprAssign", 2, $1, $3); }
 | expr SHLEQ expr                                     { $$ = mk_node("ExprAssignShl", 2, $1, $3); }
 | expr SHREQ expr                                     { $$ = mk_node("ExprAssignShr", 2, $1, $3); }
@@ -1434,6 +1439,7 @@ nonparen_expr
 | RETURN expr                                         { $$ = mk_node("ExprRet", 1, $2); }
 | BREAK                                               { $$ = mk_node("ExprBreak", 0); }
 | BREAK ident                                         { $$ = mk_node("ExprBreak", 1, $2); }
+| nonparen_expr LARROW nonparen_expr                  { $$ = mk_node("ExprInPlace", 2, $1, $3); }
 | nonparen_expr '=' nonparen_expr                     { $$ = mk_node("ExprAssign", 2, $1, $3); }
 | nonparen_expr SHLEQ nonparen_expr                   { $$ = mk_node("ExprAssignShl", 2, $1, $3); }
 | nonparen_expr SHREQ nonparen_expr                   { $$ = mk_node("ExprAssignShr", 2, $1, $3); }
@@ -1494,6 +1500,7 @@ expr_nostruct
 | RETURN expr                                         { $$ = mk_node("ExprRet", 1, $2); }
 | BREAK                                               { $$ = mk_node("ExprBreak", 0); }
 | BREAK ident                                         { $$ = mk_node("ExprBreak", 1, $2); }
+| expr_nostruct LARROW expr_nostruct                  { $$ = mk_node("ExprInPlace", 2, $1, $3); }
 | expr_nostruct '=' expr_nostruct                     { $$ = mk_node("ExprAssign", 2, $1, $3); }
 | expr_nostruct SHLEQ expr_nostruct                   { $$ = mk_node("ExprAssignShl", 2, $1, $3); }
 | expr_nostruct SHREQ expr_nostruct                   { $$ = mk_node("ExprAssignShr", 2, $1, $3); }
@@ -1771,8 +1778,8 @@ lit
 str
 : LIT_STR                    { $$ = mk_node("LitStr", 1, mk_atom(yytext), mk_atom("CookedStr")); }
 | LIT_STR_RAW                { $$ = mk_node("LitStr", 1, mk_atom(yytext), mk_atom("RawStr")); }
-| LIT_BINARY                 { $$ = mk_node("LitBinary", 1, mk_atom(yytext), mk_atom("BinaryStr")); }
-| LIT_BINARY_RAW             { $$ = mk_node("LitBinary", 1, mk_atom(yytext), mk_atom("RawBinaryStr")); }
+| LIT_BYTE_STR                 { $$ = mk_node("LitByteStr", 1, mk_atom(yytext), mk_atom("ByteStr")); }
+| LIT_BYTE_STR_RAW             { $$ = mk_node("LitByteStr", 1, mk_atom(yytext), mk_atom("RawByteStr")); }
 ;
 
 maybe_ident
@@ -1793,6 +1800,7 @@ unpaired_token
 | GE                         { $$ = mk_atom(yytext); }
 | ANDAND                     { $$ = mk_atom(yytext); }
 | OROR                       { $$ = mk_atom(yytext); }
+| LARROW                     { $$ = mk_atom(yytext); }
 | SHLEQ                      { $$ = mk_atom(yytext); }
 | SHREQ                      { $$ = mk_atom(yytext); }
 | MINUSEQ                    { $$ = mk_atom(yytext); }
@@ -1814,8 +1822,8 @@ unpaired_token
 | LIT_FLOAT                  { $$ = mk_atom(yytext); }
 | LIT_STR                    { $$ = mk_atom(yytext); }
 | LIT_STR_RAW                { $$ = mk_atom(yytext); }
-| LIT_BINARY                 { $$ = mk_atom(yytext); }
-| LIT_BINARY_RAW             { $$ = mk_atom(yytext); }
+| LIT_BYTE_STR               { $$ = mk_atom(yytext); }
+| LIT_BYTE_STR_RAW           { $$ = mk_atom(yytext); }
 | IDENT                      { $$ = mk_atom(yytext); }
 | UNDERSCORE                 { $$ = mk_atom(yytext); }
 | LIFETIME                   { $$ = mk_atom(yytext); }

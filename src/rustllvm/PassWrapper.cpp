@@ -49,26 +49,52 @@ LLVMInitializePasses() {
   initializeVectorization(Registry);
   initializeIPO(Registry);
   initializeAnalysis(Registry);
+#if LLVM_VERSION_MINOR <= 7
   initializeIPA(Registry);
+#endif
   initializeTransformUtils(Registry);
   initializeInstCombine(Registry);
   initializeInstrumentation(Registry);
   initializeTarget(Registry);
 }
 
-extern "C" bool
-LLVMRustAddPass(LLVMPassManagerRef PM, const char *PassName) {
-    PassManagerBase *pm = unwrap(PM);
 
+enum class SupportedPassKind {
+  Function,
+  Module,
+  Unsupported
+};
+
+extern "C" Pass*
+LLVMRustFindAndCreatePass(const char *PassName) {
     StringRef SR(PassName);
     PassRegistry *PR = PassRegistry::getPassRegistry();
 
     const PassInfo *PI = PR->getPassInfo(SR);
     if (PI) {
-        pm->add(PI->createPass());
-        return true;
+        return PI->createPass();
     }
-    return false;
+    return NULL;
+}
+
+extern "C" SupportedPassKind
+LLVMRustPassKind(Pass *pass) {
+    assert(pass);
+    PassKind passKind = pass->getPassKind();
+    if (passKind == PT_Module) {
+        return SupportedPassKind::Module;
+    } else if (passKind == PT_Function) {
+        return SupportedPassKind::Function;
+    } else {
+        return SupportedPassKind::Unsupported;
+    }
+}
+
+extern "C" void
+LLVMRustAddPass(LLVMPassManagerRef PM, Pass *pass) {
+    assert(pass);
+    PassManagerBase *pm = unwrap(PM);
+    pm->add(pass);
 }
 
 extern "C" LLVMTargetMachineRef
@@ -78,7 +104,6 @@ LLVMRustCreateTargetMachine(const char *triple,
                             CodeModel::Model CM,
                             Reloc::Model RM,
                             CodeGenOpt::Level OptLevel,
-                            bool EnableSegmentedStacks,
                             bool UseSoftFloat,
                             bool PositionIndependentExecutable,
                             bool FunctionSections,
@@ -250,7 +275,7 @@ LLVMRustWriteOutputFile(LLVMTargetMachineRef Target,
 #endif
   PM->run(*unwrap(M));
 
-  // Apparently `addPassesToEmitFile` adds an pointer to our on-the-stack output
+  // Apparently `addPassesToEmitFile` adds a pointer to our on-the-stack output
   // stream (OS), so the only real safe place to delete this is here? Don't we
   // wish this was written in Rust?
   delete PM;
@@ -335,8 +360,7 @@ LLVMRustSetDataLayoutFromTargetMachine(LLVMModuleRef Module,
                                        LLVMTargetMachineRef TMR) {
     TargetMachine *Target = unwrap(TMR);
 #if LLVM_VERSION_MINOR >= 7
-    if (const DataLayout *DL = Target->getDataLayout())
-        unwrap(Module)->setDataLayout(*DL);
+    unwrap(Module)->setDataLayout(Target->createDataLayout());
 #elif LLVM_VERSION_MINOR >= 6
     if (const DataLayout *DL = Target->getSubtargetImpl()->getDataLayout())
         unwrap(Module)->setDataLayout(DL);

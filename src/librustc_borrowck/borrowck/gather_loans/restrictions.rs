@@ -10,12 +10,11 @@
 
 //! Computes the restrictions that result from a borrow.
 
-pub use self::RestrictionResult::*;
-
 use borrowck::*;
 use rustc::middle::expr_use_visitor as euv;
 use rustc::middle::mem_categorization as mc;
-use rustc::middle::ty;
+use rustc::middle::mem_categorization::Categorization;
+use rustc::ty;
 use syntax::codemap::Span;
 
 use borrowck::ToInteriorKind;
@@ -62,49 +61,53 @@ impl<'a, 'tcx> RestrictionsContext<'a, 'tcx> {
         let new_lp = |v: LoanPathKind<'tcx>| Rc::new(LoanPath::new(v, cmt.ty));
 
         match cmt.cat.clone() {
-            mc::cat_rvalue(..) => {
+            Categorization::Rvalue(..) => {
                 // Effectively, rvalues are stored into a
                 // non-aliasable temporary on the stack. Since they
                 // are inherently non-aliasable, they can only be
                 // accessed later through the borrow itself and hence
                 // must inherently comply with its terms.
-                Safe
+                RestrictionResult::Safe
             }
 
-            mc::cat_local(local_id) => {
+            Categorization::Local(local_id) => {
                 // R-Variable, locally declared
                 let lp = new_lp(LpVar(local_id));
-                SafeIf(lp.clone(), vec![lp])
+                RestrictionResult::SafeIf(lp.clone(), vec![lp])
             }
 
-            mc::cat_upvar(mc::Upvar { id, .. }) => {
+            Categorization::Upvar(mc::Upvar { id, .. }) => {
                 // R-Variable, captured into closure
                 let lp = new_lp(LpUpvar(id));
-                SafeIf(lp.clone(), vec![lp])
+                RestrictionResult::SafeIf(lp.clone(), vec![lp])
             }
 
-            mc::cat_downcast(cmt_base, _) => {
+            Categorization::Downcast(cmt_base, _) => {
                 // When we borrow the interior of an enum, we have to
                 // ensure the enum itself is not mutated, because that
                 // could cause the type of the memory to change.
                 self.restrict(cmt_base)
             }
 
-            mc::cat_interior(cmt_base, i) => {
+            Categorization::Interior(cmt_base, i) => {
                 // R-Field
                 //
                 // Overwriting the base would not change the type of
                 // the memory, so no additional restrictions are
                 // needed.
+                let opt_variant_id = match cmt_base.cat {
+                    Categorization::Downcast(_, variant_id) => Some(variant_id),
+                    _ => None
+                };
                 let result = self.restrict(cmt_base);
-                self.extend(result, &cmt, LpInterior(i.cleaned()))
+                self.extend(result, &cmt, LpInterior(opt_variant_id, i.cleaned()))
             }
 
-            mc::cat_static_item(..) => {
-                Safe
+            Categorization::StaticItem => {
+                RestrictionResult::Safe
             }
 
-            mc::cat_deref(cmt_base, _, pk) => {
+            Categorization::Deref(cmt_base, _, pk) => {
                 match pk {
                     mc::Unique => {
                         // R-Deref-Send-Pointer
@@ -128,11 +131,11 @@ impl<'a, 'tcx> RestrictionsContext<'a, 'tcx> {
                                     cmt: cmt_base,
                                     code: err_borrowed_pointer_too_short(
                                         self.loan_region, lt)});
-                            return Safe;
+                            return RestrictionResult::Safe;
                         }
 
                         match bk {
-                            ty::ImmBorrow => Safe,
+                            ty::ImmBorrow => RestrictionResult::Safe,
                             ty::MutBorrow | ty::UniqueImmBorrow => {
                                 // R-Deref-Mut-Borrowed
                                 //
@@ -145,7 +148,7 @@ impl<'a, 'tcx> RestrictionsContext<'a, 'tcx> {
                         }
                     }
                     // Borrowck is not relevant for raw pointers
-                    mc::UnsafePtr(..) => Safe
+                    mc::UnsafePtr(..) => RestrictionResult::Safe
                 }
             }
         }
@@ -156,12 +159,12 @@ impl<'a, 'tcx> RestrictionsContext<'a, 'tcx> {
               cmt: &mc::cmt<'tcx>,
               elem: LoanPathElem) -> RestrictionResult<'tcx> {
         match result {
-            Safe => Safe,
-            SafeIf(base_lp, mut base_vec) => {
+            RestrictionResult::Safe => RestrictionResult::Safe,
+            RestrictionResult::SafeIf(base_lp, mut base_vec) => {
                 let v = LpExtend(base_lp, cmt.mutbl, elem);
                 let lp = Rc::new(LoanPath::new(v, cmt.ty));
                 base_vec.push(lp.clone());
-                SafeIf(lp, base_vec)
+                RestrictionResult::SafeIf(lp, base_vec)
             }
         }
     }

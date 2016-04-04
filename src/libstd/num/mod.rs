@@ -8,17 +8,20 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! Numeric traits and functions for generic mathematics
+//! Additional functionality for numerics.
 //!
-//! These are implemented for the primitive numeric types in `std::{u8, u16,
-//! u32, u64, usize, i8, i16, i32, i64, isize, f32, f64}`.
+//! This module provides some extra types that are useful when doing numerical
+//! work. See the individual documentation for each piece for more information.
 
 #![stable(feature = "rust1", since = "1.0.0")]
 #![allow(missing_docs)]
 
+#[stable(feature = "rust1", since = "1.0.0")]
 pub use core::num::{Zero, One};
+#[stable(feature = "rust1", since = "1.0.0")]
 pub use core::num::{FpCategory, ParseIntError, ParseFloatError};
-pub use core::num::{wrapping, Wrapping};
+#[stable(feature = "rust1", since = "1.0.0")]
+pub use core::num::Wrapping;
 
 #[cfg(test)] use cmp::PartialEq;
 #[cfg(test)] use fmt;
@@ -43,13 +46,7 @@ pub fn test_num<T>(ten: T, two: T) where
 
 #[cfg(test)]
 mod tests {
-    use core::prelude::*;
     use super::*;
-    use i8;
-    use i16;
-    use i32;
-    use i64;
-    use isize;
     use u8;
     use u16;
     use u32;

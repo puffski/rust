@@ -13,14 +13,16 @@
 //!
 //! `Any` itself can be used to get a `TypeId`, and has more features when used
 //! as a trait object. As `&Any` (a borrowed trait object), it has the `is` and
-//! `as_ref` methods, to test if the contained value is of a given type, and to
-//! get a reference to the inner value as a type. As `&mut Any`, there is also
-//! the `as_mut` method, for getting a mutable reference to the inner value.
-//! `Box<Any>` adds the `move` method, which will unwrap a `Box<T>` from the
-//! object.  See the extension traits (`*Ext`) for the full details.
+//! `downcast_ref` methods, to test if the contained value is of a given type,
+//! and to get a reference to the inner value as a type. As `&mut Any`, there
+//! is also the `downcast_mut` method, for getting a mutable reference to the
+//! inner value. `Box<Any>` adds the `downcast` method, which attempts to
+//! convert to a `Box<T>`. See the [`Box`] documentation for the full details.
 //!
 //! Note that &Any is limited to testing whether a value is of a specified
 //! concrete type, and cannot be used to test whether a type implements a trait.
+//!
+//! [`Box`]: ../../std/boxed/struct.Box.html
 //!
 //! # Examples
 //!
@@ -91,11 +93,13 @@ use marker::{Reflect, Sized};
 pub trait Any: Reflect + 'static {
     /// Gets the `TypeId` of `self`.
     #[unstable(feature = "get_type_id",
-               reason = "this method will likely be replaced by an associated static")]
+               reason = "this method will likely be replaced by an associated static",
+               issue = "27745")]
     fn get_type_id(&self) -> TypeId;
 }
 
-impl<T: Reflect + 'static> Any for T {
+#[stable(feature = "rust1", since = "1.0.0")]
+impl<T: Reflect + 'static + ?Sized > Any for T {
     fn get_type_id(&self) -> TypeId { TypeId::of::<T>() }
 }
 
@@ -146,7 +150,7 @@ impl Any {
                 let to: TraitObject = transmute(self);
 
                 // Extract the data pointer
-                Some(transmute(to.data))
+                Some(&*(to.data as *const T))
             }
         } else {
             None
@@ -164,7 +168,7 @@ impl Any {
                 let to: TraitObject = transmute(self);
 
                 // Extract the data pointer
-                Some(transmute(to.data))
+                Some(&mut *(to.data as *const T as *mut T))
             }
         } else {
             None

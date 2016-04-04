@@ -18,15 +18,8 @@ trait Bar
 }
 
 fn make_bar<T:Bar>(t: &T) -> &Bar {
-    t
-        //~^ ERROR `Bar` is not object-safe
-        //~| NOTE the trait cannot require that `Self : Sized`
-}
-
-fn make_bar_explicit<T:Bar>(t: &T) -> &Bar {
-    t as &Bar
-        //~^ ERROR `Bar` is not object-safe
-        //~| NOTE the trait cannot require that `Self : Sized`
+        //~^ ERROR E0038
+    loop { }
 }
 
 fn main() {

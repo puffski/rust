@@ -16,7 +16,7 @@ mod pingpong {
     use send_packet;
     pub type ping = send_packet<pong>;
     pub struct pong(send_packet<ping>);
-    //~^ ERROR illegal recursive struct type; wrap the inner value in a box to make it representable
+    //~^ ERROR recursive type `pingpong::pong` has infinite size
 }
 
 fn main() {}

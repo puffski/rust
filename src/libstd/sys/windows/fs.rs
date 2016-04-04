@@ -8,68 +8,78 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use core::prelude::*;
+use prelude::v1::*;
 use io::prelude::*;
 use os::windows::prelude::*;
 
 use ffi::OsString;
 use fmt;
 use io::{self, Error, SeekFrom};
-use libc::{self, HANDLE};
 use mem;
 use path::{Path, PathBuf};
 use ptr;
 use slice;
 use sync::Arc;
 use sys::handle::Handle;
+use sys::time::SystemTime;
 use sys::{c, cvt};
 use sys_common::FromInner;
-use vec::Vec;
+
+use super::to_u16s;
 
 pub struct File { handle: Handle }
 
+#[derive(Clone)]
 pub struct FileAttr {
-    data: c::WIN32_FILE_ATTRIBUTE_DATA,
-    reparse_tag: libc::DWORD,
+    attributes: c::DWORD,
+    creation_time: c::FILETIME,
+    last_access_time: c::FILETIME,
+    last_write_time: c::FILETIME,
+    file_size: u64,
+    reparse_tag: c::DWORD,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub enum FileType {
-    Dir, File, Symlink, ReparsePoint, MountPoint,
+    Dir, File, SymlinkFile, SymlinkDir, ReparsePoint, MountPoint,
 }
 
 pub struct ReadDir {
     handle: FindNextFileHandle,
     root: Arc<PathBuf>,
-    first: Option<libc::WIN32_FIND_DATAW>,
+    first: Option<c::WIN32_FIND_DATAW>,
 }
 
-struct FindNextFileHandle(libc::HANDLE);
+struct FindNextFileHandle(c::HANDLE);
 
 unsafe impl Send for FindNextFileHandle {}
 unsafe impl Sync for FindNextFileHandle {}
 
 pub struct DirEntry {
     root: Arc<PathBuf>,
-    data: libc::WIN32_FIND_DATAW,
+    data: c::WIN32_FIND_DATAW,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct OpenOptions {
-    create: bool,
-    append: bool,
+    // generic
     read: bool,
     write: bool,
+    append: bool,
     truncate: bool,
-    desired_access: Option<libc::DWORD>,
-    share_mode: Option<libc::DWORD>,
-    creation_disposition: Option<libc::DWORD>,
-    flags_and_attributes: Option<libc::DWORD>,
-    security_attributes: usize, // *mut T doesn't have a Default impl
+    create: bool,
+    create_new: bool,
+    // system-specific
+    custom_flags: u32,
+    access_mode: Option<c::DWORD>,
+    attributes: c::DWORD,
+    share_mode: c::DWORD,
+    security_qos_flags: c::DWORD,
+    security_attributes: usize, // FIXME: should be a reference
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct FilePermissions { attrs: libc::DWORD }
+pub struct FilePermissions { attrs: c::DWORD }
 
 pub struct DirBuilder;
 
@@ -84,9 +94,8 @@ impl Iterator for ReadDir {
         unsafe {
             let mut wfd = mem::zeroed();
             loop {
-                if libc::FindNextFileW(self.handle.0, &mut wfd) == 0 {
-                    if libc::GetLastError() ==
-                        c::ERROR_NO_MORE_FILES as libc::DWORD {
+                if c::FindNextFileW(self.handle.0, &mut wfd) == 0 {
+                    if c::GetLastError() == c::ERROR_NO_MORE_FILES {
                         return None
                     } else {
                         return Some(Err(Error::last_os_error()))
@@ -102,13 +111,13 @@ impl Iterator for ReadDir {
 
 impl Drop for FindNextFileHandle {
     fn drop(&mut self) {
-        let r = unsafe { libc::FindClose(self.0) };
+        let r = unsafe { c::FindClose(self.0) };
         debug_assert!(r != 0);
     }
 }
 
 impl DirEntry {
-    fn new(root: &Arc<PathBuf>, wfd: &libc::WIN32_FIND_DATAW) -> Option<DirEntry> {
+    fn new(root: &Arc<PathBuf>, wfd: &c::WIN32_FIND_DATAW) -> Option<DirEntry> {
         match &wfd.cFileName[0..3] {
             // check for '.' and '..'
             [46, 0, ..] |
@@ -138,107 +147,118 @@ impl DirEntry {
 
     pub fn metadata(&self) -> io::Result<FileAttr> {
         Ok(FileAttr {
-            data: c::WIN32_FILE_ATTRIBUTE_DATA {
-                dwFileAttributes: self.data.dwFileAttributes,
-                ftCreationTime: self.data.ftCreationTime,
-                ftLastAccessTime: self.data.ftLastAccessTime,
-                ftLastWriteTime: self.data.ftLastWriteTime,
-                nFileSizeHigh: self.data.nFileSizeHigh,
-                nFileSizeLow: self.data.nFileSizeLow,
-            },
-            reparse_tag: self.data.dwReserved0,
+            attributes: self.data.dwFileAttributes,
+            creation_time: self.data.ftCreationTime,
+            last_access_time: self.data.ftLastAccessTime,
+            last_write_time: self.data.ftLastWriteTime,
+            file_size: ((self.data.nFileSizeHigh as u64) << 32) | (self.data.nFileSizeLow as u64),
+            reparse_tag: if self.data.dwFileAttributes & c::FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                    // reserved unless this is a reparse point
+                    self.data.dwReserved0
+                } else {
+                    0
+                },
         })
     }
 }
 
 impl OpenOptions {
-    pub fn new() -> OpenOptions { Default::default() }
+    pub fn new() -> OpenOptions {
+        OpenOptions {
+            // generic
+            read: false,
+            write: false,
+            append: false,
+            truncate: false,
+            create: false,
+            create_new: false,
+            // system-specific
+            custom_flags: 0,
+            access_mode: None,
+            share_mode: c::FILE_SHARE_READ | c::FILE_SHARE_WRITE | c::FILE_SHARE_DELETE,
+            attributes: 0,
+            security_qos_flags: 0,
+            security_attributes: 0,
+        }
+    }
+
     pub fn read(&mut self, read: bool) { self.read = read; }
     pub fn write(&mut self, write: bool) { self.write = write; }
     pub fn append(&mut self, append: bool) { self.append = append; }
-    pub fn create(&mut self, create: bool) { self.create = create; }
     pub fn truncate(&mut self, truncate: bool) { self.truncate = truncate; }
-    pub fn creation_disposition(&mut self, val: u32) {
-        self.creation_disposition = Some(val);
-    }
-    pub fn flags_and_attributes(&mut self, val: u32) {
-        self.flags_and_attributes = Some(val);
-    }
-    pub fn desired_access(&mut self, val: u32) {
-        self.desired_access = Some(val);
-    }
-    pub fn share_mode(&mut self, val: u32) {
-        self.share_mode = Some(val);
-    }
-    pub fn security_attributes(&mut self, attrs: libc::LPSECURITY_ATTRIBUTES) {
+    pub fn create(&mut self, create: bool) { self.create = create; }
+    pub fn create_new(&mut self, create_new: bool) { self.create_new = create_new; }
+
+    pub fn custom_flags(&mut self, flags: u32) { self.custom_flags = flags; }
+    pub fn access_mode(&mut self, access_mode: u32) { self.access_mode = Some(access_mode); }
+    pub fn share_mode(&mut self, share_mode: u32) { self.share_mode = share_mode; }
+    pub fn attributes(&mut self, attrs: u32) { self.attributes = attrs; }
+    pub fn security_qos_flags(&mut self, flags: u32) { self.security_qos_flags = flags; }
+    pub fn security_attributes(&mut self, attrs: c::LPSECURITY_ATTRIBUTES) {
         self.security_attributes = attrs as usize;
     }
 
-    fn get_desired_access(&self) -> libc::DWORD {
-        self.desired_access.unwrap_or({
-            let mut base = if self.read {libc::FILE_GENERIC_READ} else {0} |
-                           if self.write {libc::FILE_GENERIC_WRITE} else {0};
-            if self.append {
-                base &= !libc::FILE_WRITE_DATA;
-                base |= libc::FILE_APPEND_DATA;
-            }
-            base
-        })
+    fn get_access_mode(&self) -> io::Result<c::DWORD> {
+        const ERROR_INVALID_PARAMETER: i32 = 87;
+
+        match (self.read, self.write, self.append, self.access_mode) {
+            (_, _, _, Some(mode)) => Ok(mode),
+            (true,  false, false, None) => Ok(c::GENERIC_READ),
+            (false, true,  false, None) => Ok(c::GENERIC_WRITE),
+            (true,  true,  false, None) => Ok(c::GENERIC_READ | c::GENERIC_WRITE),
+            (false, _,     true,  None) => Ok(c::FILE_GENERIC_WRITE & !c::FILE_WRITE_DATA),
+            (true,  _,     true,  None) => Ok(c::GENERIC_READ |
+                                              (c::FILE_GENERIC_WRITE & !c::FILE_WRITE_DATA)),
+            (false, false, false, None) => Err(Error::from_raw_os_error(ERROR_INVALID_PARAMETER)),
+        }
     }
 
-    fn get_share_mode(&self) -> libc::DWORD {
-        // libuv has a good comment about this, but the basic idea is that
-        // we try to emulate unix semantics by enabling all sharing by
-        // allowing things such as deleting a file while it's still open.
-        self.share_mode.unwrap_or(libc::FILE_SHARE_READ |
-                                  libc::FILE_SHARE_WRITE |
-                                  libc::FILE_SHARE_DELETE)
+    fn get_creation_mode(&self) -> io::Result<c::DWORD> {
+        const ERROR_INVALID_PARAMETER: i32 = 87;
+
+        match (self.write, self.append) {
+            (true, false) => {}
+            (false, false) =>
+                if self.truncate || self.create || self.create_new {
+                    return Err(Error::from_raw_os_error(ERROR_INVALID_PARAMETER));
+                },
+            (_, true) =>
+                if self.truncate && !self.create_new {
+                    return Err(Error::from_raw_os_error(ERROR_INVALID_PARAMETER));
+                },
+        }
+
+        Ok(match (self.create, self.truncate, self.create_new) {
+                (false, false, false) => c::OPEN_EXISTING,
+                (true,  false, false) => c::OPEN_ALWAYS,
+                (false, true,  false) => c::TRUNCATE_EXISTING,
+                (true,  true,  false) => c::CREATE_ALWAYS,
+                (_,      _,    true)  => c::CREATE_NEW,
+           })
     }
 
-    fn get_creation_disposition(&self) -> libc::DWORD {
-        self.creation_disposition.unwrap_or({
-            match (self.create, self.truncate) {
-                (true, true) => libc::CREATE_ALWAYS,
-                (true, false) => libc::OPEN_ALWAYS,
-                (false, false) => libc::OPEN_EXISTING,
-                (false, true) => {
-                    if self.write && !self.append {
-                        libc::CREATE_ALWAYS
-                    } else {
-                        libc::TRUNCATE_EXISTING
-                    }
-                }
-            }
-        })
-    }
-
-    fn get_flags_and_attributes(&self) -> libc::DWORD {
-        self.flags_and_attributes.unwrap_or(libc::FILE_ATTRIBUTE_NORMAL)
+    fn get_flags_and_attributes(&self) -> c::DWORD {
+        self.custom_flags |
+        self.attributes |
+        self.security_qos_flags |
+        if self.security_qos_flags != 0 { c::SECURITY_SQOS_PRESENT } else { 0 } |
+        if self.create_new { c::FILE_FLAG_OPEN_REPARSE_POINT } else { 0 }
     }
 }
 
 impl File {
-    fn open_reparse_point(path: &Path, write: bool) -> io::Result<File> {
-        let mut opts = OpenOptions::new();
-        opts.read(!write);
-        opts.write(write);
-        opts.flags_and_attributes(c::FILE_FLAG_OPEN_REPARSE_POINT |
-                                  c::FILE_FLAG_BACKUP_SEMANTICS);
-        File::open(path, &opts)
-    }
-
     pub fn open(path: &Path, opts: &OpenOptions) -> io::Result<File> {
-        let path = to_utf16(path);
+        let path = to_u16s(path)?;
         let handle = unsafe {
-            libc::CreateFileW(path.as_ptr(),
-                              opts.get_desired_access(),
-                              opts.get_share_mode(),
-                              opts.security_attributes as *mut _,
-                              opts.get_creation_disposition(),
-                              opts.get_flags_and_attributes(),
-                              ptr::null_mut())
+            c::CreateFileW(path.as_ptr(),
+                           opts.get_access_mode()?,
+                           opts.share_mode,
+                           opts.security_attributes as *mut _,
+                           opts.get_creation_mode()?,
+                           opts.get_flags_and_attributes(),
+                           ptr::null_mut())
         };
-        if handle == libc::INVALID_HANDLE_VALUE {
+        if handle == c::INVALID_HANDLE_VALUE {
             Err(Error::last_os_error())
         } else {
             Ok(File { handle: Handle::new(handle) })
@@ -246,7 +266,7 @@ impl File {
     }
 
     pub fn fsync(&self) -> io::Result<()> {
-        try!(cvt(unsafe { libc::FlushFileBuffers(self.handle.raw()) }));
+        cvt(unsafe { c::FlushFileBuffers(self.handle.raw()) })?;
         Ok(())
     }
 
@@ -254,32 +274,29 @@ impl File {
 
     pub fn truncate(&self, size: u64) -> io::Result<()> {
         let mut info = c::FILE_END_OF_FILE_INFO {
-            EndOfFile: size as libc::LARGE_INTEGER,
+            EndOfFile: size as c::LARGE_INTEGER,
         };
         let size = mem::size_of_val(&info);
-        try!(cvt(unsafe {
+        cvt(unsafe {
             c::SetFileInformationByHandle(self.handle.raw(),
                                           c::FileEndOfFileInfo,
                                           &mut info as *mut _ as *mut _,
-                                          size as libc::DWORD)
-        }));
+                                          size as c::DWORD)
+        })?;
         Ok(())
     }
 
     pub fn file_attr(&self) -> io::Result<FileAttr> {
         unsafe {
             let mut info: c::BY_HANDLE_FILE_INFORMATION = mem::zeroed();
-            try!(cvt(c::GetFileInformationByHandle(self.handle.raw(),
-                                                   &mut info)));
+            cvt(c::GetFileInformationByHandle(self.handle.raw(),
+                                              &mut info))?;
             let mut attr = FileAttr {
-                data: c::WIN32_FILE_ATTRIBUTE_DATA {
-                    dwFileAttributes: info.dwFileAttributes,
-                    ftCreationTime: info.ftCreationTime,
-                    ftLastAccessTime: info.ftLastAccessTime,
-                    ftLastWriteTime: info.ftLastWriteTime,
-                    nFileSizeHigh: info.nFileSizeHigh,
-                    nFileSizeLow: info.nFileSizeLow,
-                },
+                attributes: info.dwFileAttributes,
+                creation_time: info.ftCreationTime,
+                last_access_time: info.ftLastAccessTime,
+                last_write_time: info.ftLastWriteTime,
+                file_size: ((info.nFileSizeHigh as u64) << 32) | (info.nFileSizeLow as u64),
                 reparse_tag: 0,
             };
             if attr.is_reparse_point() {
@@ -296,6 +313,10 @@ impl File {
         self.handle.read(buf)
     }
 
+    pub fn read_to_end(&self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        self.handle.read_to_end(buf)
+    }
+
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
         self.handle.write(buf)
     }
@@ -304,17 +325,23 @@ impl File {
 
     pub fn seek(&self, pos: SeekFrom) -> io::Result<u64> {
         let (whence, pos) = match pos {
-            SeekFrom::Start(n) => (libc::FILE_BEGIN, n as i64),
-            SeekFrom::End(n) => (libc::FILE_END, n),
-            SeekFrom::Current(n) => (libc::FILE_CURRENT, n),
+            SeekFrom::Start(n) => (c::FILE_BEGIN, n as i64),
+            SeekFrom::End(n) => (c::FILE_END, n),
+            SeekFrom::Current(n) => (c::FILE_CURRENT, n),
         };
-        let pos = pos as libc::LARGE_INTEGER;
+        let pos = pos as c::LARGE_INTEGER;
         let mut newpos = 0;
-        try!(cvt(unsafe {
-            libc::SetFilePointerEx(self.handle.raw(), pos,
-                                   &mut newpos, whence)
-        }));
+        cvt(unsafe {
+            c::SetFilePointerEx(self.handle.raw(), pos,
+                                &mut newpos, whence)
+        })?;
         Ok(newpos as u64)
+    }
+
+    pub fn duplicate(&self) -> io::Result<File> {
+        Ok(File {
+            handle: self.handle.duplicate(0, true, c::DUPLICATE_SAME_ACCESS)?,
+        })
     }
 
     pub fn handle(&self) -> &Handle { &self.handle }
@@ -323,46 +350,61 @@ impl File {
 
     fn reparse_point<'a>(&self,
                          space: &'a mut [u8; c::MAXIMUM_REPARSE_DATA_BUFFER_SIZE])
-                         -> io::Result<(libc::DWORD, &'a c::REPARSE_DATA_BUFFER)> {
+                         -> io::Result<(c::DWORD, &'a c::REPARSE_DATA_BUFFER)> {
         unsafe {
             let mut bytes = 0;
-            try!(cvt({
+            cvt({
                 c::DeviceIoControl(self.handle.raw(),
                                    c::FSCTL_GET_REPARSE_POINT,
-                                   0 as *mut _,
+                                   ptr::null_mut(),
                                    0,
                                    space.as_mut_ptr() as *mut _,
-                                   space.len() as libc::DWORD,
+                                   space.len() as c::DWORD,
                                    &mut bytes,
-                                   0 as *mut _)
-            }));
+                                   ptr::null_mut())
+            })?;
             Ok((bytes, &*(space.as_ptr() as *const c::REPARSE_DATA_BUFFER)))
         }
     }
 
     fn readlink(&self) -> io::Result<PathBuf> {
         let mut space = [0u8; c::MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
-        let (_bytes, buf) = try!(self.reparse_point(&mut space));
-        if buf.ReparseTag != c::IO_REPARSE_TAG_SYMLINK {
-            return Err(io::Error::new(io::ErrorKind::Other, "not a symlink"))
-        }
-
+        let (_bytes, buf) = self.reparse_point(&mut space)?;
         unsafe {
-            let info: *const c::SYMBOLIC_LINK_REPARSE_BUFFER =
-                    &buf.rest as *const _ as *const _;
-            let path_buffer = &(*info).PathBuffer as *const _ as *const u16;
-            let subst_off = (*info).SubstituteNameOffset / 2;
+            let (path_buffer, subst_off, subst_len, relative) = match buf.ReparseTag {
+                c::IO_REPARSE_TAG_SYMLINK => {
+                    let info: *const c::SYMBOLIC_LINK_REPARSE_BUFFER =
+                        &buf.rest as *const _ as *const _;
+                    (&(*info).PathBuffer as *const _ as *const u16,
+                     (*info).SubstituteNameOffset / 2,
+                     (*info).SubstituteNameLength / 2,
+                     (*info).Flags & c::SYMLINK_FLAG_RELATIVE != 0)
+                },
+                c::IO_REPARSE_TAG_MOUNT_POINT => {
+                    let info: *const c::MOUNT_POINT_REPARSE_BUFFER =
+                        &buf.rest as *const _ as *const _;
+                    (&(*info).PathBuffer as *const _ as *const u16,
+                     (*info).SubstituteNameOffset / 2,
+                     (*info).SubstituteNameLength / 2,
+                     false)
+                },
+                _ => return Err(io::Error::new(io::ErrorKind::Other,
+                                               "Unsupported reparse point type"))
+            };
             let subst_ptr = path_buffer.offset(subst_off as isize);
-            let subst_len = (*info).SubstituteNameLength / 2;
-            let subst = slice::from_raw_parts(subst_ptr, subst_len as usize);
-
+            let mut subst = slice::from_raw_parts(subst_ptr, subst_len as usize);
+            // Absolute paths start with an NT internal namespace prefix `\??\`
+            // We should not let it leak through.
+            if !relative && subst.starts_with(&[92u16, 63u16, 63u16, 92u16]) {
+                subst = &subst[4..];
+            }
             Ok(PathBuf::from(OsString::from_wide(subst)))
         }
     }
 }
 
-impl FromInner<libc::HANDLE> for File {
-    fn from_inner(handle: libc::HANDLE) -> File {
+impl FromInner<c::HANDLE> for File {
+    fn from_inner(handle: c::HANDLE) -> File {
         File { handle: Handle::new(handle) }
     }
 }
@@ -379,36 +421,52 @@ impl fmt::Debug for File {
     }
 }
 
-pub fn to_utf16(s: &Path) -> Vec<u16> {
-    s.as_os_str().encode_wide().chain(Some(0)).collect()
-}
-
 impl FileAttr {
     pub fn size(&self) -> u64 {
-        ((self.data.nFileSizeHigh as u64) << 32) | (self.data.nFileSizeLow as u64)
+        self.file_size
     }
 
     pub fn perm(&self) -> FilePermissions {
-        FilePermissions { attrs: self.data.dwFileAttributes }
+        FilePermissions { attrs: self.attributes }
     }
 
-    pub fn attrs(&self) -> u32 { self.data.dwFileAttributes as u32 }
+    pub fn attrs(&self) -> u32 { self.attributes as u32 }
 
     pub fn file_type(&self) -> FileType {
-        FileType::new(self.data.dwFileAttributes, self.reparse_tag)
+        FileType::new(self.attributes, self.reparse_tag)
     }
 
-    pub fn created(&self) -> u64 { self.to_u64(&self.data.ftCreationTime) }
-    pub fn accessed(&self) -> u64 { self.to_u64(&self.data.ftLastAccessTime) }
-    pub fn modified(&self) -> u64 { self.to_u64(&self.data.ftLastWriteTime) }
+    pub fn modified(&self) -> io::Result<SystemTime> {
+        Ok(SystemTime::from(self.last_write_time))
+    }
 
-    fn to_u64(&self, ft: &libc::FILETIME) -> u64 {
-        (ft.dwLowDateTime as u64) | ((ft.dwHighDateTime as u64) << 32)
+    pub fn accessed(&self) -> io::Result<SystemTime> {
+        Ok(SystemTime::from(self.last_access_time))
+    }
+
+    pub fn created(&self) -> io::Result<SystemTime> {
+        Ok(SystemTime::from(self.creation_time))
+    }
+
+    pub fn modified_u64(&self) -> u64 {
+        to_u64(&self.last_write_time)
+    }
+
+    pub fn accessed_u64(&self) -> u64 {
+        to_u64(&self.last_access_time)
+    }
+
+    pub fn created_u64(&self) -> u64 {
+        to_u64(&self.creation_time)
     }
 
     fn is_reparse_point(&self) -> bool {
-        self.data.dwFileAttributes & libc::FILE_ATTRIBUTE_REPARSE_POINT != 0
+        self.attributes & c::FILE_ATTRIBUTE_REPARSE_POINT != 0
     }
+}
+
+fn to_u64(ft: &c::FILETIME) -> u64 {
+    (ft.dwLowDateTime as u64) | ((ft.dwHighDateTime as u64) << 32)
 }
 
 impl FilePermissions {
@@ -426,24 +484,31 @@ impl FilePermissions {
 }
 
 impl FileType {
-    fn new(attrs: libc::DWORD, reparse_tag: libc::DWORD) -> FileType {
-        if attrs & libc::FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            match reparse_tag {
-                c::IO_REPARSE_TAG_SYMLINK => FileType::Symlink,
-                c::IO_REPARSE_TAG_MOUNT_POINT => FileType::MountPoint,
-                _ => FileType::ReparsePoint,
-            }
-        } else if attrs & c::FILE_ATTRIBUTE_DIRECTORY != 0 {
-            FileType::Dir
-        } else {
-            FileType::File
+    fn new(attrs: c::DWORD, reparse_tag: c::DWORD) -> FileType {
+        match (attrs & c::FILE_ATTRIBUTE_DIRECTORY != 0,
+               attrs & c::FILE_ATTRIBUTE_REPARSE_POINT != 0,
+               reparse_tag) {
+            (false, false, _) => FileType::File,
+            (true, false, _) => FileType::Dir,
+            (false, true, c::IO_REPARSE_TAG_SYMLINK) => FileType::SymlinkFile,
+            (true, true, c::IO_REPARSE_TAG_SYMLINK) => FileType::SymlinkDir,
+            (true, true, c::IO_REPARSE_TAG_MOUNT_POINT) => FileType::MountPoint,
+            (_, true, _) => FileType::ReparsePoint,
+            // Note: if a _file_ has a reparse tag of the type IO_REPARSE_TAG_MOUNT_POINT it is
+            // invalid, as junctions always have to be dirs. We set the filetype to ReparsePoint
+            // to indicate it is something symlink-like, but not something you can follow.
         }
     }
 
     pub fn is_dir(&self) -> bool { *self == FileType::Dir }
     pub fn is_file(&self) -> bool { *self == FileType::File }
     pub fn is_symlink(&self) -> bool {
-        *self == FileType::Symlink || *self == FileType::MountPoint
+        *self == FileType::SymlinkFile ||
+        *self == FileType::SymlinkDir ||
+        *self == FileType::MountPoint
+    }
+    pub fn is_symlink_dir(&self) -> bool {
+        *self == FileType::SymlinkDir || *self == FileType::MountPoint
     }
 }
 
@@ -451,10 +516,10 @@ impl DirBuilder {
     pub fn new() -> DirBuilder { DirBuilder }
 
     pub fn mkdir(&self, p: &Path) -> io::Result<()> {
-        let p = to_utf16(p);
-        try!(cvt(unsafe {
-            libc::CreateDirectoryW(p.as_ptr(), ptr::null_mut())
-        }));
+        let p = to_u16s(p)?;
+        cvt(unsafe {
+            c::CreateDirectoryW(p.as_ptr(), ptr::null_mut())
+        })?;
         Ok(())
     }
 }
@@ -462,12 +527,12 @@ impl DirBuilder {
 pub fn readdir(p: &Path) -> io::Result<ReadDir> {
     let root = p.to_path_buf();
     let star = p.join("*");
-    let path = to_utf16(&star);
+    let path = to_u16s(&star)?;
 
     unsafe {
         let mut wfd = mem::zeroed();
-        let find_handle = libc::FindFirstFileW(path.as_ptr(), &mut wfd);
-        if find_handle != libc::INVALID_HANDLE_VALUE {
+        let find_handle = c::FindFirstFileW(path.as_ptr(), &mut wfd);
+        if find_handle != c::INVALID_HANDLE_VALUE {
             Ok(ReadDir {
                 handle: FindNextFileHandle(find_handle),
                 root: Arc::new(root),
@@ -480,29 +545,61 @@ pub fn readdir(p: &Path) -> io::Result<ReadDir> {
 }
 
 pub fn unlink(p: &Path) -> io::Result<()> {
-    let p_utf16 = to_utf16(p);
-    try!(cvt(unsafe { libc::DeleteFileW(p_utf16.as_ptr()) }));
+    let p_u16s = to_u16s(p)?;
+    cvt(unsafe { c::DeleteFileW(p_u16s.as_ptr()) })?;
     Ok(())
 }
 
 pub fn rename(old: &Path, new: &Path) -> io::Result<()> {
-    let old = to_utf16(old);
-    let new = to_utf16(new);
-    try!(cvt(unsafe {
-        libc::MoveFileExW(old.as_ptr(), new.as_ptr(),
-                          libc::MOVEFILE_REPLACE_EXISTING)
-    }));
+    let old = to_u16s(old)?;
+    let new = to_u16s(new)?;
+    cvt(unsafe {
+        c::MoveFileExW(old.as_ptr(), new.as_ptr(), c::MOVEFILE_REPLACE_EXISTING)
+    })?;
     Ok(())
 }
 
 pub fn rmdir(p: &Path) -> io::Result<()> {
-    let p = to_utf16(p);
-    try!(cvt(unsafe { c::RemoveDirectoryW(p.as_ptr()) }));
+    let p = to_u16s(p)?;
+    cvt(unsafe { c::RemoveDirectoryW(p.as_ptr()) })?;
     Ok(())
 }
 
-pub fn readlink(p: &Path) -> io::Result<PathBuf> {
-    let file = try!(File::open_reparse_point(p, false));
+pub fn remove_dir_all(path: &Path) -> io::Result<()> {
+    let filetype = lstat(path)?.file_type();
+    if filetype.is_symlink() {
+        // On Windows symlinks to files and directories are removed differently.
+        // rmdir only deletes dir symlinks and junctions, not file symlinks.
+        rmdir(path)
+    } else {
+        remove_dir_all_recursive(path)
+    }
+}
+
+fn remove_dir_all_recursive(path: &Path) -> io::Result<()> {
+    for child in readdir(path)? {
+        let child = child?;
+        let child_type = child.file_type()?;
+        if child_type.is_dir() {
+            remove_dir_all_recursive(&child.path())?;
+        } else if child_type.is_symlink_dir() {
+            rmdir(&child.path())?;
+        } else {
+            unlink(&child.path())?;
+        }
+    }
+    rmdir(path)
+}
+
+pub fn readlink(path: &Path) -> io::Result<PathBuf> {
+    // Open the link with no access mode, instead of generic read.
+    // By default FILE_LIST_DIRECTORY is denied for the junction "C:\Documents and Settings", so
+    // this is needed for a common case.
+    let mut opts = OpenOptions::new();
+    opts.access_mode(0);
+    opts.custom_flags(c::FILE_FLAG_OPEN_REPARSE_POINT |
+                      c::FILE_FLAG_BACKUP_SEMANTICS);
+    let file = File::open(&path, &opts)?;
     file.readlink()
 }
 
@@ -511,84 +608,55 @@ pub fn symlink(src: &Path, dst: &Path) -> io::Result<()> {
 }
 
 pub fn symlink_inner(src: &Path, dst: &Path, dir: bool) -> io::Result<()> {
-    let src = to_utf16(src);
-    let dst = to_utf16(dst);
+    let src = to_u16s(src)?;
+    let dst = to_u16s(dst)?;
     let flags = if dir { c::SYMBOLIC_LINK_FLAG_DIRECTORY } else { 0 };
-    try!(cvt(unsafe {
-        c::CreateSymbolicLinkW(dst.as_ptr(), src.as_ptr(), flags) as libc::BOOL
-    }));
+    cvt(unsafe {
+        c::CreateSymbolicLinkW(dst.as_ptr(), src.as_ptr(), flags) as c::BOOL
+    })?;
     Ok(())
 }
 
 pub fn link(src: &Path, dst: &Path) -> io::Result<()> {
-    let src = to_utf16(src);
-    let dst = to_utf16(dst);
-    try!(cvt(unsafe {
-        libc::CreateHardLinkW(dst.as_ptr(), src.as_ptr(), ptr::null_mut())
-    }));
+    let src = to_u16s(src)?;
+    let dst = to_u16s(dst)?;
+    cvt(unsafe {
+        c::CreateHardLinkW(dst.as_ptr(), src.as_ptr(), ptr::null_mut())
+    })?;
     Ok(())
 }
 
-pub fn stat(p: &Path) -> io::Result<FileAttr> {
-    let attr = try!(lstat(p));
-
-    // If this is a reparse point, then we need to reopen the file to get the
-    // actual destination. We also pass the FILE_FLAG_BACKUP_SEMANTICS flag to
-    // ensure that we can open directories (this path may be a directory
-    // junction). Once the file is opened we ask the opened handle what its
-    // metadata information is.
-    if attr.is_reparse_point() {
-        let mut opts = OpenOptions::new();
-        opts.flags_and_attributes(c::FILE_FLAG_BACKUP_SEMANTICS);
-        let file = try!(File::open(p, &opts));
-        file.file_attr()
-    } else {
-        Ok(attr)
-    }
+pub fn stat(path: &Path) -> io::Result<FileAttr> {
+    let mut opts = OpenOptions::new();
+    // No read or write permissions are necessary
+    opts.access_mode(0);
+    // This flag is so we can open directories too
+    opts.custom_flags(c::FILE_FLAG_BACKUP_SEMANTICS);
+    let file = File::open(path, &opts)?;
+    file.file_attr()
 }
 
-pub fn lstat(p: &Path) -> io::Result<FileAttr> {
-    let utf16 = to_utf16(p);
-    unsafe {
-        let mut attr: FileAttr = mem::zeroed();
-        try!(cvt(c::GetFileAttributesExW(utf16.as_ptr(),
-                                         c::GetFileExInfoStandard,
-                                         &mut attr.data as *mut _ as *mut _)));
-        if attr.is_reparse_point() {
-            attr.reparse_tag = File::open_reparse_point(p, false).and_then(|f| {
-                let mut b = [0; c::MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
-                f.reparse_point(&mut b).map(|(_, b)| b.ReparseTag)
-            }).unwrap_or(0);
-        }
-        Ok(attr)
-    }
+pub fn lstat(path: &Path) -> io::Result<FileAttr> {
+    let mut opts = OpenOptions::new();
+    // No read or write permissions are necessary
+    opts.access_mode(0);
+    opts.custom_flags(c::FILE_FLAG_BACKUP_SEMANTICS | c::FILE_FLAG_OPEN_REPARSE_POINT);
+    let file = File::open(path, &opts)?;
+    file.file_attr()
 }
 
 pub fn set_perm(p: &Path, perm: FilePermissions) -> io::Result<()> {
-    let p = to_utf16(p);
+    let p = to_u16s(p)?;
     unsafe {
-        try!(cvt(c::SetFileAttributesW(p.as_ptr(), perm.attrs)));
+        cvt(c::SetFileAttributesW(p.as_ptr(), perm.attrs))?;
         Ok(())
     }
-}
-
-pub fn utimes(p: &Path, atime: u64, mtime: u64) -> io::Result<()> {
-    let atime = super::ms_to_filetime(atime);
-    let mtime = super::ms_to_filetime(mtime);
-
-    let mut o = OpenOptions::new();
-    o.write(true);
-    let f = try!(File::open(p, &o));
-    try!(cvt(unsafe {
-        c::SetFileTime(f.handle.raw(), 0 as *const _, &atime, &mtime)
-    }));
-    Ok(())
 }
 
 fn get_path(f: &File) -> io::Result<PathBuf> {
     super::fill_utf16_buf(|buf, sz| unsafe {
         c::GetFinalPathNameByHandleW(f.handle.raw(), buf, sz,
-                                     libc::VOLUME_NAME_DOS)
+                                     c::VOLUME_NAME_DOS)
     }, |buf| {
         PathBuf::from(OsString::from_wide(buf))
     })
@@ -596,153 +664,89 @@ fn get_path(f: &File) -> io::Result<PathBuf> {
 
 pub fn canonicalize(p: &Path) -> io::Result<PathBuf> {
     let mut opts = OpenOptions::new();
-    opts.read(true);
-    let f = try!(File::open(p, &opts));
+    // No read or write permissions are necessary
+    opts.access_mode(0);
+    // This flag is so we can open directories too
+    opts.custom_flags(c::FILE_FLAG_BACKUP_SEMANTICS);
+    let f = File::open(p, &opts)?;
     get_path(&f)
 }
 
 pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
     unsafe extern "system" fn callback(
-        _TotalFileSize: libc::LARGE_INTEGER,
-        TotalBytesTransferred: libc::LARGE_INTEGER,
-        _StreamSize: libc::LARGE_INTEGER,
-        _StreamBytesTransferred: libc::LARGE_INTEGER,
-        _dwStreamNumber: libc::DWORD,
-        _dwCallbackReason: libc::DWORD,
-        _hSourceFile: HANDLE,
-        _hDestinationFile: HANDLE,
-        lpData: libc::LPVOID,
-    ) -> libc::DWORD {
+        _TotalFileSize: c::LARGE_INTEGER,
+        TotalBytesTransferred: c::LARGE_INTEGER,
+        _StreamSize: c::LARGE_INTEGER,
+        _StreamBytesTransferred: c::LARGE_INTEGER,
+        _dwStreamNumber: c::DWORD,
+        _dwCallbackReason: c::DWORD,
+        _hSourceFile: c::HANDLE,
+        _hDestinationFile: c::HANDLE,
+        lpData: c::LPVOID,
+    ) -> c::DWORD {
         *(lpData as *mut i64) = TotalBytesTransferred;
         c::PROGRESS_CONTINUE
     }
-    let pfrom = to_utf16(from);
-    let pto = to_utf16(to);
+    let pfrom = to_u16s(from)?;
+    let pto = to_u16s(to)?;
     let mut size = 0i64;
-    try!(cvt(unsafe {
+    cvt(unsafe {
         c::CopyFileExW(pfrom.as_ptr(), pto.as_ptr(), Some(callback),
                        &mut size as *mut _ as *mut _, ptr::null_mut(), 0)
-    }));
+    })?;
     Ok(size as u64)
 }
 
-#[test]
-fn directory_junctions_are_directories() {
-    use ffi::OsStr;
-    use env;
-    use rand::{self, StdRng, Rng};
+#[allow(dead_code)]
+pub fn symlink_junction<P: AsRef<Path>, Q: AsRef<Path>>(src: P, dst: Q) -> io::Result<()> {
+    symlink_junction_inner(src.as_ref(), dst.as_ref())
+}
 
-    macro_rules! t {
-        ($e:expr) => (match $e {
-            Ok(e) => e,
-            Err(e) => panic!("{} failed with: {}", stringify!($e), e),
-        })
-    }
-
+// Creating a directory junction on windows involves dealing with reparse
+// points and the DeviceIoControl function, and this code is a skeleton of
+// what can be found here:
+//
+// http://www.flexhex.com/docs/articles/hard-links.phtml
+#[allow(dead_code)]
+fn symlink_junction_inner(target: &Path, junction: &Path) -> io::Result<()> {
     let d = DirBuilder::new();
-    let p = env::temp_dir();
-    let mut r = rand::thread_rng();
-    let ret = p.join(&format!("rust-{}", r.next_u32()));
-    let foo = ret.join("foo");
-    let bar = ret.join("bar");
-    t!(d.mkdir(&ret));
-    t!(d.mkdir(&foo));
-    t!(d.mkdir(&bar));
+    d.mkdir(&junction)?;
 
-    t!(create_junction(&bar, &foo));
-    let metadata = stat(&bar);
-    t!(delete_junction(&bar));
+    let mut opts = OpenOptions::new();
+    opts.write(true);
+    opts.custom_flags(c::FILE_FLAG_OPEN_REPARSE_POINT |
+                      c::FILE_FLAG_BACKUP_SEMANTICS);
+    let f = File::open(junction, &opts)?;
+    let h = f.handle().raw();
 
-    t!(rmdir(&foo));
-    t!(rmdir(&bar));
-    t!(rmdir(&ret));
-
-    let metadata = t!(metadata);
-    assert!(metadata.file_type().is_dir());
-
-    // Creating a directory junction on windows involves dealing with reparse
-    // points and the DeviceIoControl function, and this code is a skeleton of
-    // what can be found here:
-    //
-    // http://www.flexhex.com/docs/articles/hard-links.phtml
-    fn create_junction(src: &Path, dst: &Path) -> io::Result<()> {
-        let f = try!(opendir(src, true));
-        let h = f.handle().raw();
-
-        unsafe {
-            let mut data = [0u8; c::MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
-            let mut db = data.as_mut_ptr()
-                            as *mut c::REPARSE_MOUNTPOINT_DATA_BUFFER;
-            let mut buf = &mut (*db).ReparseTarget as *mut _;
-            let mut i = 0;
-            let v = br"\??\";
-            let v = v.iter().map(|x| *x as u16);
-            for c in v.chain(dst.as_os_str().encode_wide()) {
-                *buf.offset(i) = c;
-                i += 1;
-            }
-            *buf.offset(i) = 0;
+    unsafe {
+        let mut data = [0u8; c::MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
+        let mut db = data.as_mut_ptr()
+                        as *mut c::REPARSE_MOUNTPOINT_DATA_BUFFER;
+        let buf = &mut (*db).ReparseTarget as *mut _;
+        let mut i = 0;
+        // FIXME: this conversion is very hacky
+        let v = br"\??\";
+        let v = v.iter().map(|x| *x as u16);
+        for c in v.chain(target.as_os_str().encode_wide()) {
+            *buf.offset(i) = c;
             i += 1;
-            (*db).ReparseTag = c::IO_REPARSE_TAG_MOUNT_POINT;
-            (*db).ReparseTargetMaximumLength = (i * 2) as libc::WORD;
-            (*db).ReparseTargetLength = ((i - 1) * 2) as libc::WORD;
-            (*db).ReparseDataLength =
-                    (*db).ReparseTargetLength as libc::DWORD + 12;
-
-            let mut ret = 0;
-            cvt(c::DeviceIoControl(h as *mut _,
-                                   c::FSCTL_SET_REPARSE_POINT,
-                                   data.as_ptr() as *mut _,
-                                   (*db).ReparseDataLength + 8,
-                                   0 as *mut _, 0,
-                                   &mut ret,
-                                   0 as *mut _)).map(|_| ())
         }
-    }
+        *buf.offset(i) = 0;
+        i += 1;
+        (*db).ReparseTag = c::IO_REPARSE_TAG_MOUNT_POINT;
+        (*db).ReparseTargetMaximumLength = (i * 2) as c::WORD;
+        (*db).ReparseTargetLength = ((i - 1) * 2) as c::WORD;
+        (*db).ReparseDataLength =
+                (*db).ReparseTargetLength as c::DWORD + 12;
 
-    fn opendir(p: &Path, write: bool) -> io::Result<File> {
-        unsafe {
-            let mut token = 0 as *mut _;
-            let mut tp: c::TOKEN_PRIVILEGES = mem::zeroed();
-            try!(cvt(c::OpenProcessToken(c::GetCurrentProcess(),
-                                         c::TOKEN_ADJUST_PRIVILEGES,
-                                         &mut token)));
-            let name: &OsStr = if write {
-                "SeRestorePrivilege".as_ref()
-            } else {
-                "SeBackupPrivilege".as_ref()
-            };
-            let name = name.encode_wide().chain(Some(0)).collect::<Vec<_>>();
-            try!(cvt(c::LookupPrivilegeValueW(0 as *const _,
-                                              name.as_ptr(),
-                                              &mut tp.Privileges[0].Luid)));
-            tp.PrivilegeCount = 1;
-            tp.Privileges[0].Attributes = c::SE_PRIVILEGE_ENABLED;
-            let size = mem::size_of::<c::TOKEN_PRIVILEGES>() as libc::DWORD;
-            try!(cvt(c::AdjustTokenPrivileges(token, libc::FALSE, &mut tp, size,
-                                              0 as *mut _, 0 as *mut _)));
-            try!(cvt(libc::CloseHandle(token)));
-
-            File::open_reparse_point(p, write)
-        }
-    }
-
-    fn delete_junction(p: &Path) -> io::Result<()> {
-        unsafe {
-            let f = try!(opendir(p, true));
-            let h = f.handle().raw();
-            let mut data = [0u8; c::MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
-            let mut db = data.as_mut_ptr()
-                            as *mut c::REPARSE_MOUNTPOINT_DATA_BUFFER;
-            (*db).ReparseTag = c::IO_REPARSE_TAG_MOUNT_POINT;
-            let mut bytes = 0;
-            cvt(c::DeviceIoControl(h as *mut _,
-                                   c::FSCTL_DELETE_REPARSE_POINT,
-                                   data.as_ptr() as *mut _,
-                                   (*db).ReparseDataLength + 8,
-                                   0 as *mut _, 0,
-                                   &mut bytes,
-                                   0 as *mut _)).map(|_| ())
-        }
+        let mut ret = 0;
+        cvt(c::DeviceIoControl(h as *mut _,
+                               c::FSCTL_SET_REPARSE_POINT,
+                               data.as_ptr() as *mut _,
+                               (*db).ReparseDataLength + 8,
+                               ptr::null_mut(), 0,
+                               &mut ret,
+                               ptr::null_mut())).map(|_| ())
     }
 }

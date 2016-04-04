@@ -8,16 +8,12 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![unstable(feature = "tcp", reason = "remaining functions have not been \
-                                       scrutinized enough to be stabilized")]
-
 use prelude::v1::*;
 use io::prelude::*;
 
 use fmt;
 use io;
 use net::{ToSocketAddrs, SocketAddr, Shutdown};
-use sys_common::io::read_to_end_uninitialized;
 use sys_common::net as net_imp;
 use sys_common::{AsInner, FromInner, IntoInner};
 use time::Duration;
@@ -128,26 +124,18 @@ impl TcpStream {
         self.0.duplicate().map(TcpStream)
     }
 
-    /// Sets the nodelay flag on this connection to the boolean specified.
-    pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
-        self.0.set_nodelay(nodelay)
-    }
-
-    /// Sets the keepalive timeout to the timeout specified.
-    ///
-    /// If the value specified is `None`, then the keepalive flag is cleared on
-    /// this connection. Otherwise, the keepalive timeout will be set to the
-    /// specified time, in seconds.
-    pub fn set_keepalive(&self, seconds: Option<u32>) -> io::Result<()> {
-        self.0.set_keepalive(seconds)
-    }
-
     /// Sets the read timeout to the timeout specified.
     ///
     /// If the value specified is `None`, then `read` calls will block
     /// indefinitely. It is an error to pass the zero `Duration` to this
     /// method.
-    #[unstable(feature = "socket_timeout", reason = "RFC 1047 - recently added")]
+    ///
+    /// # Note
+    ///
+    /// Platforms may return a different error code whenever a read times out as
+    /// a result of setting this option. For example Unix typically returns an
+    /// error of the kind `WouldBlock`, but Windows may return `TimedOut`.
+    #[stable(feature = "socket_timeout", since = "1.4.0")]
     pub fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
         self.0.set_read_timeout(dur)
     }
@@ -157,7 +145,13 @@ impl TcpStream {
     /// If the value specified is `None`, then `write` calls will block
     /// indefinitely. It is an error to pass the zero `Duration` to this
     /// method.
-    #[unstable(feature = "socket_timeout", reason = "RFC 1047 - recently added")]
+    ///
+    /// # Note
+    ///
+    /// Platforms may return a different error code whenever a write times out
+    /// as a result of setting this option. For example Unix typically returns
+    /// an error of the kind `WouldBlock`, but Windows may return `TimedOut`.
+    #[stable(feature = "socket_timeout", since = "1.4.0")]
     pub fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
         self.0.set_write_timeout(dur)
     }
@@ -169,7 +163,7 @@ impl TcpStream {
     /// # Note
     ///
     /// Some platforms do not provide access to the current timeout.
-    #[unstable(feature = "socket_timeout", reason = "RFC 1047 - recently added")]
+    #[stable(feature = "socket_timeout", since = "1.4.0")]
     pub fn read_timeout(&self) -> io::Result<Option<Duration>> {
         self.0.read_timeout()
     }
@@ -181,9 +175,92 @@ impl TcpStream {
     /// # Note
     ///
     /// Some platforms do not provide access to the current timeout.
-    #[unstable(feature = "socket_timeout", reason = "RFC 1047 - recently added")]
+    #[stable(feature = "socket_timeout", since = "1.4.0")]
     pub fn write_timeout(&self) -> io::Result<Option<Duration>> {
         self.0.write_timeout()
+    }
+
+    /// Sets the value of the `TCP_NODELAY` option on this socket.
+    ///
+    /// If set, this option disables the Nagle algorithm. This means that
+    /// segments are always sent as soon as possible, even if there is only a
+    /// small amount of data. When not set, data is buffered until there is a
+    /// sufficient amount to send out, thereby avoiding the frequent sending of
+    /// small packets.
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
+        self.0.set_nodelay(nodelay)
+    }
+
+    /// Gets the value of the `TCP_NODELAY` option on this socket.
+    ///
+    /// For more information about this option, see [`set_nodelay`][link].
+    ///
+    /// [link]: #method.set_nodelay
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn nodelay(&self) -> io::Result<bool> {
+        self.0.nodelay()
+    }
+
+    /// Sets the value for the `IP_TTL` option on this socket.
+    ///
+    /// This value sets the time-to-live field that is used in every packet sent
+    /// from this socket.
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn set_ttl(&self, ttl: u32) -> io::Result<()> {
+        self.0.set_ttl(ttl)
+    }
+
+    /// Gets the value of the `IP_TTL` option for this socket.
+    ///
+    /// For more information about this option, see [`set_ttl`][link].
+    ///
+    /// [link]: #method.set_ttl
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn ttl(&self) -> io::Result<u32> {
+        self.0.ttl()
+    }
+
+    /// Sets the value for the `IPV6_V6ONLY` option on this socket.
+    ///
+    /// If this is set to `true` then the socket is restricted to sending and
+    /// receiving IPv6 packets only. If this is the case, an IPv4 and an IPv6
+    /// application can each bind the same port at the same time.
+    ///
+    /// If this is set to `false` then the socket can be used to send and
+    /// receive packets from an IPv4-mapped IPv6 address.
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn set_only_v6(&self, only_v6: bool) -> io::Result<()> {
+        self.0.set_only_v6(only_v6)
+    }
+
+    /// Gets the value of the `IPV6_V6ONLY` option for this socket.
+    ///
+    /// For more information about this option, see [`set_only_v6`][link].
+    ///
+    /// [link]: #method.set_only_v6
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn only_v6(&self) -> io::Result<bool> {
+        self.0.only_v6()
+    }
+
+    /// Get the value of the `SO_ERROR` option on this socket.
+    ///
+    /// This will retrieve the stored error in the underlying socket, clearing
+    /// the field in the process. This can be useful for checking errors between
+    /// calls.
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn take_error(&self) -> io::Result<Option<io::Error>> {
+        self.0.take_error()
+    }
+
+    /// Moves this TCP stream into or out of nonblocking mode.
+    ///
+    /// On Unix this corresponds to calling fcntl, and on Windows this
+    /// corresponds to calling ioctlsocket.
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        self.0.set_nonblocking(nonblocking)
     }
 }
 
@@ -191,7 +268,7 @@ impl TcpStream {
 impl Read for TcpStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> { self.0.read(buf) }
     fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
-        unsafe { read_to_end_uninitialized(self, buf) }
+        self.0.read_to_end(buf)
     }
 }
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -203,7 +280,7 @@ impl Write for TcpStream {
 impl<'a> Read for &'a TcpStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> { self.0.read(buf) }
     fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
-        unsafe { read_to_end_uninitialized(self, buf) }
+        self.0.read_to_end(buf)
     }
 }
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -224,6 +301,7 @@ impl IntoInner<net_imp::TcpStream> for TcpStream {
     fn into_inner(self) -> net_imp::TcpStream { self.0 }
 }
 
+#[stable(feature = "rust1", since = "1.0.0")]
 impl fmt::Debug for TcpStream {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         self.0.fmt(f)
@@ -238,9 +316,9 @@ impl TcpListener {
     ///
     /// Binding with a port number of 0 will request that the OS assigns a port
     /// to this listener. The port allocated can be queried via the
-    /// `socket_addr` function.
+    /// `local_addr` method.
     ///
-    /// The address type can be any implementer of `ToSocketAddrs` trait. See
+    /// The address type can be any implementor of `ToSocketAddrs` trait. See
     /// its documentation for concrete examples.
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn bind<A: ToSocketAddrs>(addr: A) -> io::Result<TcpListener> {
@@ -282,6 +360,67 @@ impl TcpListener {
     pub fn incoming(&self) -> Incoming {
         Incoming { listener: self }
     }
+
+    /// Sets the value for the `IP_TTL` option on this socket.
+    ///
+    /// This value sets the time-to-live field that is used in every packet sent
+    /// from this socket.
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn set_ttl(&self, ttl: u32) -> io::Result<()> {
+        self.0.set_ttl(ttl)
+    }
+
+    /// Gets the value of the `IP_TTL` option for this socket.
+    ///
+    /// For more information about this option, see [`set_ttl`][link].
+    ///
+    /// [link]: #method.set_ttl
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn ttl(&self) -> io::Result<u32> {
+        self.0.ttl()
+    }
+
+    /// Sets the value for the `IPV6_V6ONLY` option on this socket.
+    ///
+    /// If this is set to `true` then the socket is restricted to sending and
+    /// receiving IPv6 packets only. In this case two IPv4 and IPv6 applications
+    /// can bind the same port at the same time.
+    ///
+    /// If this is set to `false` then the socket can be used to send and
+    /// receive packets from an IPv4-mapped IPv6 address.
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn set_only_v6(&self, only_v6: bool) -> io::Result<()> {
+        self.0.set_only_v6(only_v6)
+    }
+
+    /// Gets the value of the `IPV6_V6ONLY` option for this socket.
+    ///
+    /// For more information about this option, see [`set_only_v6`][link].
+    ///
+    /// [link]: #method.set_only_v6
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn only_v6(&self) -> io::Result<bool> {
+        self.0.only_v6()
+    }
+
+    /// Get the value of the `SO_ERROR` option on this socket.
+    ///
+    /// This will retrieve the stored error in the underlying socket, clearing
+    /// the field in the process. This can be useful for checking errors between
+    /// calls.
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn take_error(&self) -> io::Result<Option<io::Error>> {
+        self.0.take_error()
+    }
+
+    /// Moves this TCP stream into or out of nonblocking mode.
+    ///
+    /// On Unix this corresponds to calling fcntl, and on Windows this
+    /// corresponds to calling ioctlsocket.
+    #[stable(feature = "net2_mutators", since = "1.9.0")]
+    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        self.0.set_nonblocking(nonblocking)
+    }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -306,6 +445,7 @@ impl IntoInner<net_imp::TcpListener> for TcpListener {
     fn into_inner(self) -> net_imp::TcpListener { self.0 }
 }
 
+#[stable(feature = "rust1", since = "1.0.0")]
 impl fmt::Debug for TcpListener {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         self.0.fmt(f)
@@ -322,7 +462,7 @@ mod tests {
     use net::test::{next_test_ip4, next_test_ip6};
     use sync::mpsc::channel;
     use sys_common::AsInner;
-    use time::Duration;
+    use time::{Instant, Duration};
     use thread;
 
     fn each_ip(f: &mut FnMut(SocketAddr)) {
@@ -378,39 +518,28 @@ mod tests {
     }
 
     #[test]
-    fn connect_ip4_loopback() {
-        let addr = next_test_ip4();
-        let acceptor = t!(TcpListener::bind(&addr));
+    fn connect_loopback() {
+        each_ip(&mut |addr| {
+            let acceptor = t!(TcpListener::bind(&addr));
 
-        let _t = thread::spawn(move|| {
-            let mut stream = t!(TcpStream::connect(&("127.0.0.1", addr.port())));
-            t!(stream.write(&[44]));
-        });
+            let _t = thread::spawn(move|| {
+                let host = match addr {
+                    SocketAddr::V4(..) => "127.0.0.1",
+                    SocketAddr::V6(..) => "::1",
+                };
+                let mut stream = t!(TcpStream::connect(&(host, addr.port())));
+                t!(stream.write(&[66]));
+            });
 
-        let mut stream = t!(acceptor.accept()).0;
-        let mut buf = [0];
-        t!(stream.read(&mut buf));
-        assert!(buf[0] == 44);
+            let mut stream = t!(acceptor.accept()).0;
+            let mut buf = [0];
+            t!(stream.read(&mut buf));
+            assert!(buf[0] == 66);
+        })
     }
 
     #[test]
-    fn connect_ip6_loopback() {
-        let addr = next_test_ip6();
-        let acceptor = t!(TcpListener::bind(&addr));
-
-        let _t = thread::spawn(move|| {
-            let mut stream = t!(TcpStream::connect(&("::1", addr.port())));
-            t!(stream.write(&[66]));
-        });
-
-        let mut stream = t!(acceptor.accept()).0;
-        let mut buf = [0];
-        t!(stream.read(&mut buf));
-        assert!(buf[0] == 66);
-    }
-
-    #[test]
-    fn smoke_test_ip6() {
+    fn smoke_test() {
         each_ip(&mut |addr| {
             let acceptor = t!(TcpListener::bind(&addr));
 
@@ -430,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn read_eof_ip4() {
+    fn read_eof() {
         each_ip(&mut |addr| {
             let acceptor = t!(TcpListener::bind(&addr));
 
@@ -475,7 +604,7 @@ mod tests {
     }
 
     #[test]
-    fn multiple_connect_serial_ip4() {
+    fn multiple_connect_serial() {
         each_ip(&mut |addr| {
             let max = 10;
             let acceptor = t!(TcpListener::bind(&addr));
@@ -532,7 +661,7 @@ mod tests {
     }
 
     #[test]
-    fn multiple_connect_interleaved_lazy_schedule_ip4() {
+    fn multiple_connect_interleaved_lazy_schedule() {
         const MAX: usize = 10;
         each_ip(&mut |addr| {
             let acceptor = t!(TcpListener::bind(&addr));
@@ -565,7 +694,7 @@ mod tests {
     }
 
     #[test]
-    fn socket_and_peer_name_ip4() {
+    fn socket_and_peer_name() {
         each_ip(&mut |addr| {
             let listener = t!(TcpListener::bind(&addr));
             let so_name = t!(listener.local_addr());
@@ -943,6 +1072,7 @@ mod tests {
 
         t!(stream.set_write_timeout(None));
         assert_eq!(None, t!(stream.write_timeout()));
+        drop(listener);
     }
 
     #[test]
@@ -954,12 +1084,11 @@ mod tests {
         t!(stream.set_read_timeout(Some(Duration::from_millis(1000))));
 
         let mut buf = [0; 10];
-        let wait = Duration::span(|| {
-            let kind = stream.read(&mut buf).err().expect("expected error").kind();
-            assert!(kind == ErrorKind::WouldBlock || kind == ErrorKind::TimedOut);
-        });
-        assert!(wait > Duration::from_millis(400));
-        assert!(wait < Duration::from_millis(1600));
+        let start = Instant::now();
+        let kind = stream.read(&mut buf).err().expect("expected error").kind();
+        assert!(kind == ErrorKind::WouldBlock || kind == ErrorKind::TimedOut);
+        assert!(start.elapsed() > Duration::from_millis(400));
+        drop(listener);
     }
 
     #[test]
@@ -977,11 +1106,61 @@ mod tests {
         t!(stream.read(&mut buf));
         assert_eq!(b"hello world", &buf[..]);
 
-        let wait = Duration::span(|| {
-            let kind = stream.read(&mut buf).err().expect("expected error").kind();
-            assert!(kind == ErrorKind::WouldBlock || kind == ErrorKind::TimedOut);
-        });
-        assert!(wait > Duration::from_millis(400));
-        assert!(wait < Duration::from_millis(1600));
+        let start = Instant::now();
+        let kind = stream.read(&mut buf).err().expect("expected error").kind();
+        assert!(kind == ErrorKind::WouldBlock || kind == ErrorKind::TimedOut);
+        assert!(start.elapsed() > Duration::from_millis(400));
+        drop(listener);
+    }
+
+    #[test]
+    fn nodelay() {
+        let addr = next_test_ip4();
+        let _listener = t!(TcpListener::bind(&addr));
+
+        let stream = t!(TcpStream::connect(&("localhost", addr.port())));
+
+        assert_eq!(false, t!(stream.nodelay()));
+        t!(stream.set_nodelay(true));
+        assert_eq!(true, t!(stream.nodelay()));
+        t!(stream.set_nodelay(false));
+        assert_eq!(false, t!(stream.nodelay()));
+    }
+
+    #[test]
+    fn ttl() {
+        let ttl = 100;
+
+        let addr = next_test_ip4();
+        let listener = t!(TcpListener::bind(&addr));
+
+        t!(listener.set_ttl(ttl));
+        assert_eq!(ttl, t!(listener.ttl()));
+
+        let stream = t!(TcpStream::connect(&("localhost", addr.port())));
+
+        t!(stream.set_ttl(ttl));
+        assert_eq!(ttl, t!(stream.ttl()));
+    }
+
+    #[test]
+    fn set_nonblocking() {
+        let addr = next_test_ip4();
+        let listener = t!(TcpListener::bind(&addr));
+
+        t!(listener.set_nonblocking(true));
+        t!(listener.set_nonblocking(false));
+
+        let mut stream = t!(TcpStream::connect(&("localhost", addr.port())));
+
+        t!(stream.set_nonblocking(false));
+        t!(stream.set_nonblocking(true));
+
+        let mut buf = [0];
+        match stream.read(&mut buf) {
+            Ok(_) => panic!("expected error"),
+            Err(ref e) if e.kind() == ErrorKind::WouldBlock => {}
+            Err(e) => panic!("unexpected error {}", e),
+        }
     }
 }

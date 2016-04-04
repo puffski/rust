@@ -8,50 +8,44 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-pub use self::Def::*;
-pub use self::MethodProvenance::*;
-
-use middle::privacy::LastPrivate;
-use middle::subst::ParamSpace;
+use middle::def_id::DefId;
+use ty::subst::ParamSpace;
 use util::nodemap::NodeMap;
 use syntax::ast;
-use syntax::ast_util::local_def;
-
-use std::cell::RefCell;
+use rustc_front::hir;
 
 #[derive(Clone, Copy, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash, Debug)]
 pub enum Def {
-    DefFn(ast::DefId, bool /* is_ctor */),
-    DefSelfTy(Option<ast::DefId>,                    // trait id
+    Fn(DefId),
+    SelfTy(Option<DefId>,                    // trait id
               Option<(ast::NodeId, ast::NodeId)>),   // (impl id, self type id)
-    DefMod(ast::DefId),
-    DefForeignMod(ast::DefId),
-    DefStatic(ast::DefId, bool /* is_mutbl */),
-    DefConst(ast::DefId),
-    DefAssociatedConst(ast::DefId /* const */, MethodProvenance),
-    DefLocal(ast::NodeId),
-    DefVariant(ast::DefId /* enum */, ast::DefId /* variant */, bool /* is_structure */),
-    DefTy(ast::DefId, bool /* is_enum */),
-    DefAssociatedTy(ast::DefId /* trait */, ast::DefId),
-    DefTrait(ast::DefId),
-    DefPrimTy(ast::PrimTy),
-    DefTyParam(ParamSpace, u32, ast::DefId, ast::Name),
-    DefUse(ast::DefId),
-    DefUpvar(ast::NodeId,  // id of closed over local
+    Mod(DefId),
+    ForeignMod(DefId),
+    Static(DefId, bool /* is_mutbl */),
+    Const(DefId),
+    AssociatedConst(DefId),
+    Local(DefId, // def id of variable
+             ast::NodeId), // node id of variable
+    Variant(DefId /* enum */, DefId /* variant */),
+    Enum(DefId),
+    TyAlias(DefId),
+    AssociatedTy(DefId /* trait */, DefId),
+    Trait(DefId),
+    PrimTy(hir::PrimTy),
+    TyParam(ParamSpace, u32, DefId, ast::Name),
+    Upvar(DefId,        // def id of closed over local
+             ast::NodeId,  // node id of closed over local
+             usize,        // index in the freevars list of the closure
              ast::NodeId), // expr node that creates the closure
 
-    /// Note that if it's a tuple struct's definition, the node id of the ast::DefId
-    /// may either refer to the item definition's id or the StructDef.ctor_id.
-    ///
-    /// The cases that I have encountered so far are (this is not exhaustive):
-    /// - If it's a ty_path referring to some tuple struct, then DefMap maps
-    ///   it to a def whose id is the item definition's id.
-    /// - If it's an ExprPath referring to some tuple struct, then DefMap maps
-    ///   it to a def whose id is the StructDef.ctor_id.
-    DefStruct(ast::DefId),
-    DefRegion(ast::NodeId),
-    DefLabel(ast::NodeId),
-    DefMethod(ast::DefId /* method */, MethodProvenance),
+    // If Def::Struct lives in type namespace it denotes a struct item and its DefId refers
+    // to NodeId of the struct itself.
+    // If Def::Struct lives in value namespace (e.g. tuple struct, unit struct expressions)
+    // it denotes a constructor and its DefId refers to NodeId of the struct's constructor.
+    Struct(DefId),
+    Label(ast::NodeId),
+    Method(DefId),
+    Err,
 }
 
 /// The result of resolving a path.
@@ -70,7 +64,6 @@ pub enum Def {
 #[derive(Copy, Clone, Debug)]
 pub struct PathResolution {
     pub base_def: Def,
-    pub last_private: LastPrivate,
     pub depth: usize
 }
 
@@ -78,30 +71,28 @@ impl PathResolution {
     /// Get the definition, if fully resolved, otherwise panic.
     pub fn full_def(&self) -> Def {
         if self.depth != 0 {
-            panic!("path not fully resolved: {:?}", self);
+            bug!("path not fully resolved: {:?}", self);
         }
         self.base_def
     }
 
     /// Get the DefId, if fully resolved, otherwise panic.
-    pub fn def_id(&self) -> ast::DefId {
+    pub fn def_id(&self) -> DefId {
         self.full_def().def_id()
     }
 
     pub fn new(base_def: Def,
-               last_private: LastPrivate,
                depth: usize)
                -> PathResolution {
         PathResolution {
             base_def: base_def,
-            last_private: last_private,
             depth: depth,
         }
     }
 }
 
 // Definition mapping
-pub type DefMap = RefCell<NodeMap<PathResolution>>;
+pub type DefMap = NodeMap<PathResolution>;
 // This is the replacement export map. It maps a module to all of the exports
 // within.
 pub type ExportMap = NodeMap<Vec<Export>>;
@@ -109,61 +100,77 @@ pub type ExportMap = NodeMap<Vec<Export>>;
 #[derive(Copy, Clone)]
 pub struct Export {
     pub name: ast::Name,    // The name of the target.
-    pub def_id: ast::DefId, // The definition of the target.
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, RustcEncodable, RustcDecodable, Hash, Debug)]
-pub enum MethodProvenance {
-    FromTrait(ast::DefId),
-    FromImpl(ast::DefId),
-}
-
-impl MethodProvenance {
-    pub fn map<F>(self, f: F) -> MethodProvenance where
-        F: FnOnce(ast::DefId) -> ast::DefId,
-    {
-        match self {
-            FromTrait(did) => FromTrait(f(did)),
-            FromImpl(did) => FromImpl(f(did))
-        }
-    }
+    pub def_id: DefId, // The definition of the target.
 }
 
 impl Def {
-    pub fn local_node_id(&self) -> ast::NodeId {
-        let def_id = self.def_id();
-        assert_eq!(def_id.krate, ast::LOCAL_CRATE);
-        def_id.node
-    }
-
-    pub fn def_id(&self) -> ast::DefId {
+    pub fn var_id(&self) -> ast::NodeId {
         match *self {
-            DefFn(id, _) | DefMod(id) | DefForeignMod(id) | DefStatic(id, _) |
-            DefVariant(_, id, _) | DefTy(id, _) | DefAssociatedTy(_, id) |
-            DefTyParam(_, _, id, _) | DefUse(id) | DefStruct(id) | DefTrait(id) |
-            DefMethod(id, _) | DefConst(id) | DefAssociatedConst(id, _) |
-            DefSelfTy(Some(id), None)=> {
+            Def::Local(_, id) |
+            Def::Upvar(_, id, _, _) => {
                 id
             }
-            DefLocal(id) |
-            DefUpvar(id, _) |
-            DefRegion(id) |
-            DefLabel(id)  |
-            DefSelfTy(_, Some((_, id))) => {
-                local_def(id)
-            }
 
-            DefPrimTy(_) => panic!("attempted .def_id() on DefPrimTy"),
-            DefSelfTy(..) => panic!("attempted .def_id() on invalid DefSelfTy"),
+            Def::Fn(..) | Def::Mod(..) | Def::ForeignMod(..) | Def::Static(..) |
+            Def::Variant(..) | Def::Enum(..) | Def::TyAlias(..) | Def::AssociatedTy(..) |
+            Def::TyParam(..) | Def::Struct(..) | Def::Trait(..) |
+            Def::Method(..) | Def::Const(..) | Def::AssociatedConst(..) |
+            Def::PrimTy(..) | Def::Label(..) | Def::SelfTy(..) | Def::Err => {
+                bug!("attempted .var_id() on invalid {:?}", self)
+            }
         }
     }
 
-    pub fn variant_def_ids(&self) -> Option<(ast::DefId, ast::DefId)> {
+    pub fn def_id(&self) -> DefId {
         match *self {
-            DefVariant(enum_id, var_id, _) => {
+            Def::Fn(id) | Def::Mod(id) | Def::ForeignMod(id) | Def::Static(id, _) |
+            Def::Variant(_, id) | Def::Enum(id) | Def::TyAlias(id) | Def::AssociatedTy(_, id) |
+            Def::TyParam(_, _, id, _) | Def::Struct(id) | Def::Trait(id) |
+            Def::Method(id) | Def::Const(id) | Def::AssociatedConst(id) |
+            Def::Local(id, _) | Def::Upvar(id, _, _, _) => {
+                id
+            }
+
+            Def::Label(..)  |
+            Def::PrimTy(..) |
+            Def::SelfTy(..) |
+            Def::Err => {
+                bug!("attempted .def_id() on invalid def: {:?}", self)
+            }
+        }
+    }
+
+    pub fn variant_def_ids(&self) -> Option<(DefId, DefId)> {
+        match *self {
+            Def::Variant(enum_id, var_id) => {
                 Some((enum_id, var_id))
             }
             _ => None
+        }
+    }
+
+    pub fn kind_name(&self) -> &'static str {
+        match *self {
+            Def::Fn(..) => "function",
+            Def::Mod(..) => "module",
+            Def::ForeignMod(..) => "foreign module",
+            Def::Static(..) => "static",
+            Def::Variant(..) => "variant",
+            Def::Enum(..) => "enum",
+            Def::TyAlias(..) => "type",
+            Def::AssociatedTy(..) => "associated type",
+            Def::Struct(..) => "struct",
+            Def::Trait(..) => "trait",
+            Def::Method(..) => "method",
+            Def::Const(..) => "const",
+            Def::AssociatedConst(..) => "associated const",
+            Def::TyParam(..) => "type parameter",
+            Def::PrimTy(..) => "builtin type",
+            Def::Local(..) => "local variable",
+            Def::Upvar(..) => "closure capture",
+            Def::Label(..) => "label",
+            Def::SelfTy(..) => "self type",
+            Def::Err => "unresolved item",
         }
     }
 }

@@ -12,25 +12,120 @@
 //
 /// The boolean type.
 ///
+/// The `bool` represents a value, which could only be either `true` or `false`.
+///
+/// # Basic usage
+///
+/// `bool` implements various traits, such as [`BitAnd`], [`BitOr`], [`Not`], etc.,
+/// which allow us to perform boolean operations using `&`, `|` and `!`.
+///
+/// [`if`] always demands a `bool` value. [`assert!`], being an important macro in testing,
+/// checks whether an expression returns `true`.
+///
+/// ```
+/// let bool_val = true & false | false;
+/// assert!(!bool_val);
+/// ```
+///
+/// [`assert!`]: macro.assert!.html
+/// [`if` conditionals]: ../book/if.html
+/// [`BitAnd`]: ops/trait.BitAnd.html
+/// [`BitOr`]: ops/trait.BitOr.html
+/// [`Not`]: ops/trait.Not.html
+///
+/// # Examples
+///
+/// A trivial example of the usage of `bool`,
+///
+/// ```
+/// let praise_the_borrow_checker = true;
+///
+/// // using the `if` conditional
+/// if praise_the_borrow_checker {
+///     println!("oh, yeah!");
+/// } else {
+///     println!("what?!!");
+/// }
+///
+/// // ... or, a match pattern
+/// match praise_the_borrow_checker {
+///     true => println!("keep praising!"),
+///     false => println!("you should praise!"),
+/// }
+/// ```
+///
+/// Also, since `bool` implements the [`Copy`](marker/trait.Copy.html) trait, we don't
+/// have to worry about the move semantics (just like the integer and float primitives).
 mod prim_bool { }
 
 #[doc(primitive = "char")]
 //
-/// A Unicode scalar value.
+/// A character type.
 ///
-/// A `char` represents a
-/// *[Unicode scalar
-/// value](http://www.unicode.org/glossary/#unicode_scalar_value)*, as it can
-/// contain any Unicode code point except high-surrogate and low-surrogate code
-/// points.
+/// The `char` type represents a single character. More specifically, since
+/// 'character' isn't a well-defined concept in Unicode, `char` is a '[Unicode
+/// scalar value]', which is similar to, but not the same as, a '[Unicode code
+/// point]'.
 ///
-/// As such, only values in the ranges \[0x0,0xD7FF\] and \[0xE000,0x10FFFF\]
-/// (inclusive) are allowed. A `char` can always be safely cast to a `u32`;
-/// however the converse is not always true due to the above range limits
-/// and, as such, should be performed via the `from_u32` function.
+/// [Unicode scalar value]: http://www.unicode.org/glossary/#unicode_scalar_value
+/// [Unicode code point]: http://www.unicode.org/glossary/#code_point
 ///
-/// *[See also the `std::char` module](char/index.html).*
+/// This documentation describes a number of methods and trait implementations on the
+/// `char` type. For technical reasons, there is additional, separate
+/// documentation in [the `std::char` module](char/index.html) as well.
 ///
+/// # Representation
+///
+/// `char` is always four bytes in size. This is a different representation than
+/// a given character would have as part of a [`String`]. For example:
+///
+/// ```
+/// let v = vec!['h', 'e', 'l', 'l', 'o'];
+///
+/// // five elements times four bytes for each element
+/// assert_eq!(20, v.len() * std::mem::size_of::<char>());
+///
+/// let s = String::from("hello");
+///
+/// // five elements times one byte per element
+/// assert_eq!(5, s.len() * std::mem::size_of::<u8>());
+/// ```
+///
+/// [`String`]: string/struct.String.html
+///
+/// As always, remember that a human intuition for 'character' may not map to
+/// Unicode's definitions. For example, emoji symbols such as '❤️' can be more
+/// than one Unicode code point; this ❤️ in particular is two:
+///
+/// ```
+/// let s = String::from("❤️");
+///
+/// // we get two chars out of a single ❤️
+/// let mut iter = s.chars();
+/// assert_eq!(Some('\u{2764}'), iter.next());
+/// assert_eq!(Some('\u{fe0f}'), iter.next());
+/// assert_eq!(None, iter.next());
+/// ```
+///
+/// This means it won't fit into a `char`. Trying to create a literal with
+/// `let heart = '❤️';` gives an error:
+///
+/// ```text
+/// error: character literal may only contain one codepoint: '❤
+/// let heart = '❤️';
+///             ^~
+/// ```
+///
+/// Another implication of the 4-byte fixed size of a `char` is that
+/// per-`char` processing can end up using a lot more memory:
+///
+/// ```
+/// let s = String::from("love: ❤️");
+/// let v: Vec<char> = s.chars().collect();
+///
+/// assert_eq!(12, s.len() * std::mem::size_of::<u8>());
+/// assert_eq!(32, v.len() * std::mem::size_of::<char>());
+/// ```
 mod prim_char { }
 
 #[doc(primitive = "unit")]
@@ -111,7 +206,6 @@ mod prim_unit { }
 /// the raw pointer. It doesn't destroy `T` or deallocate any memory.
 ///
 /// ```
-/// # #![feature(box_raw)]
 /// let my_speed: Box<i32> = Box::new(88);
 /// let my_speed: *mut i32 = Box::into_raw(my_speed);
 ///
@@ -154,8 +248,8 @@ mod prim_pointer { }
 
 #[doc(primitive = "array")]
 //
-/// A fixed-size array, denoted `[T; N]`, for the element type, `T`, and
-/// the non-negative compile time constant size, `N`.
+/// A fixed-size array, denoted `[T; N]`, for the element type, `T`, and the
+/// non-negative compile time constant size, `N`.
 ///
 /// Arrays values are created either with an explicit expression that lists
 /// each element: `[x, y, z]` or a repeat expression: `[x; N]`. The repeat
@@ -163,18 +257,20 @@ mod prim_pointer { }
 ///
 /// The type `[T; N]` is `Copy` if `T: Copy`.
 ///
-/// Arrays of sizes from 0 to 32 (inclusive) implement the following traits
-/// if the element type allows it:
+/// Arrays of sizes from 0 to 32 (inclusive) implement the following traits if
+/// the element type allows it:
 ///
-/// - `Clone`
+/// - `Clone` (only if `T: Copy`)
 /// - `Debug`
 /// - `IntoIterator` (implemented for `&[T; N]` and `&mut [T; N]`)
 /// - `PartialEq`, `PartialOrd`, `Ord`, `Eq`
 /// - `Hash`
 /// - `AsRef`, `AsMut`
+/// - `Borrow`, `BorrowMut`
+/// - `Default`
 ///
-/// Arrays dereference to [slices (`[T]`)][slice], so their methods can be called
-/// on arrays.
+/// Arrays coerce to [slices (`[T]`)][slice], so their methods can be called on
+/// arrays.
 ///
 /// [slice]: primitive.slice.html
 ///
@@ -231,94 +327,158 @@ mod prim_slice { }
 
 #[doc(primitive = "str")]
 //
-/// Unicode string slices.
+/// String slices.
 ///
-/// Rust's `str` type is one of the core primitive types of the language. `&str`
-/// is the borrowed string type. This type of string can only be created from
-/// other strings, unless it is a `&'static str` (see below). It is not possible
-/// to move out of borrowed strings because they are owned elsewhere.
+/// The `str` type, also called a 'string slice', is the most primitive string
+/// type. It is usually seen in its borrowed form, `&str`. It is also the type
+/// of string literals, `&'static str`.
+///
+/// Strings slices are always valid UTF-8.
+///
+/// This documentation describes a number of methods and trait implementations
+/// on the `str` type. For technical reasons, there is additional, separate
+/// documentation in [the `std::str` module](str/index.html) as well.
 ///
 /// # Examples
 ///
-/// Here's some code that uses a `&str`:
+/// String literals are string slices:
 ///
 /// ```
-/// let s = "Hello, world.";
+/// let hello = "Hello, world!";
+///
+/// // with an explicit type annotation
+/// let hello: &'static str = "Hello, world!";
 /// ```
 ///
-/// This `&str` is a `&'static str`, which is the type of string literals.
-/// They're `'static` because literals are available for the entire lifetime of
-/// the program.
-///
-/// You can get a non-`'static` `&str` by taking a slice of a `String`:
-///
-/// ```
-/// let some_string = "Hello, world.".to_string();
-/// let s = &some_string;
-/// ```
+/// They are `'static` because they're stored directly in the final binary, and
+/// so will be valid for the `'static` duration.
 ///
 /// # Representation
 ///
-/// Rust's string type, `str`, is a sequence of Unicode scalar values encoded as
-/// a stream of UTF-8 bytes. All [strings](../../reference.html#literals) are
-/// guaranteed to be validly encoded UTF-8 sequences. Additionally, strings are
-/// not null-terminated and can thus contain null bytes.
+/// A `&str` is made up of two components: a pointer to some bytes, and a
+/// length. You can look at these with the [`.as_ptr()`] and [`len()`] methods:
 ///
-/// The actual representation of `str`s have direct mappings to slices: `&str`
-/// is the same as `&[u8]`.
+/// ```
+/// use std::slice;
+/// use std::str;
 ///
-/// *[See also the `std::str` module](str/index.html).*
+/// let story = "Once upon a time...";
 ///
+/// let ptr = story.as_ptr();
+/// let len = story.len();
+///
+/// // story has nineteen bytes
+/// assert_eq!(19, len);
+///
+/// // We can re-build a str out of ptr and len. This is all unsafe because
+/// // we are responsible for making sure the two components are valid:
+/// let s = unsafe {
+///     // First, we build a &[u8]...
+///     let slice = slice::from_raw_parts(ptr, len);
+///
+///     // ... and then convert that slice into a string slice
+///     str::from_utf8(slice)
+/// };
+///
+/// assert_eq!(s, Ok(story));
+/// ```
+///
+/// [`.as_ptr()`]: #method.as_ptr
+/// [`len()`]: #method.len
 mod prim_str { }
 
 #[doc(primitive = "tuple")]
 //
 /// A finite heterogeneous sequence, `(T, U, ..)`.
 ///
-/// To access the _N_-th element of a tuple one can use `N` itself
-/// as a field of the tuple.
+/// Let's cover each of those in turn:
 ///
-/// Indexing starts from zero, so `0` returns first value, `1`
-/// returns second value, and so on. In general, a tuple with _S_
-/// elements provides aforementioned fields from `0` to `S-1`.
+/// Tuples are *finite*. In other words, a tuple has a length. Here's a tuple
+/// of length `3`:
+///
+/// ```
+/// ("hello", 5, 'c');
+/// ```
+///
+/// 'Length' is also sometimes called 'arity' here; each tuple of a different
+/// length is a different, distinct type.
+///
+/// Tuples are *heterogeneous*. This means that each element of the tuple can
+/// have a different type. In that tuple above, it has the type:
+///
+/// ```rust,ignore
+/// (&'static str, i32, char)
+/// ```
+///
+/// Tuples are a *sequence*. This means that they can be accessed by position;
+/// this is called 'tuple indexing', and it looks like this:
+///
+/// ```rust
+/// let tuple = ("hello", 5, 'c');
+///
+/// assert_eq!(tuple.0, "hello");
+/// assert_eq!(tuple.1, 5);
+/// assert_eq!(tuple.2, 'c');
+/// ```
+///
+/// For more about tuples, see [the book](../book/primitive-types.html#tuples).
+///
+/// # Trait implementations
 ///
 /// If every type inside a tuple implements one of the following
 /// traits, then a tuple itself also implements it.
 ///
-/// * `Clone`
-/// * `PartialEq`
-/// * `Eq`
-/// * `PartialOrd`
-/// * `Ord`
-/// * `Debug`
-/// * `Default`
-/// * `Hash`
+/// * [`Clone`]
+/// * [`PartialEq`]
+/// * [`Eq`]
+/// * [`PartialOrd`]
+/// * [`Ord`]
+/// * [`Debug`]
+/// * [`Default`]
+/// * [`Hash`]
+///
+/// [`Clone`]: clone/trait.Clone.html
+/// [`PartialEq`]: cmp/trait.PartialEq.html
+/// [`Eq`]: cmp/trait.Eq.html
+/// [`PartialOrd`]: cmp/trait.PartialOrd.html
+/// [`Ord`]: cmp/trait.Ord.html
+/// [`Debug`]: fmt/trait.Debug.html
+/// [`Default`]: default/trait.Default.html
+/// [`Hash`]: hash/trait.Hash.html
+///
+/// Due to a temporary restriction in Rust's type system, these traits are only
+/// implemented on tuples of arity 32 or less. In the future, this may change.
 ///
 /// # Examples
 ///
-/// Accessing elements of a tuple at specified indices:
+/// Basic usage:
 ///
 /// ```
-/// let x = ("colorless",  "green", "ideas", "sleep", "furiously");
-/// assert_eq!(x.3, "sleep");
+/// let tuple = ("hello", 5, 'c');
 ///
-/// let v = (3, 3);
-/// let u = (1, -5);
-/// assert_eq!(v.0 * u.0 + v.1 * u.1, -12);
+/// assert_eq!(tuple.0, "hello");
 /// ```
 ///
-/// Using traits implemented for tuples:
+/// Tuples are often used as a return type when you want to return more than
+/// one value:
 ///
 /// ```
-/// let a = (1, 2);
-/// let b = (3, 4);
-/// assert!(a != b);
+/// fn calculate_point() -> (i32, i32) {
+///     // Don't do a calculation, that's not the point of the example
+///     (4, 5)
+/// }
 ///
-/// let c = b.clone();
-/// assert!(b == c);
+/// let point = calculate_point();
 ///
-/// let d : (u32, f32) = Default::default();
-/// assert_eq!(d, (0, 0.0f32));
+/// assert_eq!(point.0, 4);
+/// assert_eq!(point.1, 5);
+///
+/// // Combining this with patterns can be nicer.
+///
+/// let (x, y) = calculate_point();
+///
+/// assert_eq!(x, 4);
+/// assert_eq!(y, 5);
 /// ```
 ///
 mod prim_tuple { }
@@ -328,6 +488,9 @@ mod prim_tuple { }
 ///
 /// *[See also the `std::f32` module](f32/index.html).*
 ///
+/// However, please note that examples are shared between the `f64` and `f32`
+/// primitive types. So it's normal if you see usage of `f64` in there.
+///
 mod prim_f32 { }
 
 #[doc(primitive = "f64")]
@@ -335,6 +498,9 @@ mod prim_f32 { }
 /// The 64-bit floating point type.
 ///
 /// *[See also the `std::f64` module](f64/index.html).*
+///
+/// However, please note that examples are shared between the `f64` and `f32`
+/// primitive types. So it's normal if you see usage of `f32` in there.
 ///
 mod prim_f64 { }
 
@@ -412,9 +578,8 @@ mod prim_isize { }
 
 #[doc(primitive = "usize")]
 //
-/// The pointer-sized signed integer type.
+/// The pointer-sized unsigned integer type.
 ///
 /// *[See also the `std::usize` module](usize/index.html).*
 ///
 mod prim_usize { }
-

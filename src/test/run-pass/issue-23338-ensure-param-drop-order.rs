@@ -8,6 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![feature(rustc_attrs)]
+
 // ignore-pretty : (#23623) problems when  ending with // comments
 
 // This test is ensuring that parameters are indeed dropped after
@@ -19,7 +21,7 @@ use self::d::D;
 
 pub fn main() {
     let log = RefCell::new(vec![]);
-    d::println(&format!("created empty log"));
+    d::println("created empty log");
     test(&log);
 
     assert_eq!(&log.borrow()[..],
@@ -59,19 +61,20 @@ pub fn main() {
 fn test<'a>(log: d::Log<'a>) {
     let da = D::new("da", 0, log);
     let de = D::new("de", 1, log);
-    d::println(&format!("calling foo"));
+    d::println("calling foo");
     let result = foo(da, de);
     d::println(&format!("result {}", result));
 }
 
+#[rustc_no_mir] // FIXME #29855 MIR doesn't handle all drops correctly.
 fn foo<'a>(da0: D<'a>, de1: D<'a>) -> D<'a> {
-    d::println(&format!("entered foo"));
+    d::println("entered foo");
     let de2 = de1.incr();      // creates D(de_2, 2)
     let de4 = {
         let _da1 = da0.incr(); // creates D(da_1, 3)
         de2.incr().incr()      // creates D(de_3, 4) and D(de_4, 5)
     };
-    d::println(&format!("eval tail of foo"));
+    d::println("eval tail of foo");
     de4.incr().incr()          // creates D(de_5, 6) and D(de_6, 7)
 }
 

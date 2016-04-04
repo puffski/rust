@@ -10,7 +10,9 @@
 
 #![feature(box_syntax)]
 
-fn dup(x: Box<isize>) -> Box<(Box<isize>,Box<isize>)> { box() (x, x) } //~ ERROR use of moved value
+fn dup(x: Box<isize>) -> Box<(Box<isize>,Box<isize>)> {
+    box (x, x) //~ ERROR use of moved value
+}
 fn main() {
     dup(box 3);
 }

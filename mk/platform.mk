@@ -14,7 +14,7 @@
 # would create a variable HOST_i686-darwin-macos with the value
 # i386.
 define DEF_HOST_VAR
-  HOST_$(1) = $(subst i686,i386,$(word 1,$(subst -, ,$(1))))
+  HOST_$(1) = $(patsubst i%86,i386,$(word 1,$(subst -, ,$(1))))
 endef
 $(foreach t,$(CFG_TARGET),$(eval $(call DEF_HOST_VAR,$(t))))
 $(foreach t,$(CFG_TARGET),$(info cfg: host for $(t) is $(HOST_$(t))))
@@ -64,31 +64,18 @@ define DEF_GOOD_VALGRIND
   ifeq ($(OSTYPE_$(1)),unknown-linux-gnu)
     GOOD_VALGRIND_$(1) = 1
   endif
-  ifneq (,$(filter $(OSTYPE_$(1)),darwin freebsd))
-    ifeq (HOST_$(1),x86_64)
+  ifneq (,$(filter $(OSTYPE_$(1)),apple-darwin freebsd))
+    ifeq ($(HOST_$(1)),x86_64)
       GOOD_VALGRIND_$(1) = 1
     endif
   endif
+  ifdef GOOD_VALGRIND_$(t)
+    $$(info cfg: have good valgrind for $(t))
+  else
+    $$(info cfg: no good valgrind for $(t))
+  endif
 endef
 $(foreach t,$(CFG_TARGET),$(eval $(call DEF_GOOD_VALGRIND,$(t))))
-$(foreach t,$(CFG_TARGET),$(info cfg: good valgrind for $(t) is $(GOOD_VALGRIND_$(t))))
-
-ifneq ($(findstring linux,$(CFG_OSTYPE)),)
-  ifdef CFG_PERF
-    ifneq ($(CFG_PERF_WITH_LOGFD),)
-        CFG_PERF_TOOL := $(CFG_PERF) stat -r 3 --log-fd 2
-    else
-        CFG_PERF_TOOL := $(CFG_PERF) stat -r 3
-    endif
-  else
-    ifdef CFG_VALGRIND
-      CFG_PERF_TOOL := \
-        $(CFG_VALGRIND) --tool=cachegrind --cache-sim=yes --branch-sim=yes
-    else
-      CFG_PERF_TOOL := /usr/bin/time --verbose
-    endif
-  endif
-endif
 
 AR := ar
 
@@ -113,8 +100,10 @@ CFG_RLIB_GLOB=lib$(1)-*.rlib
 include $(wildcard $(CFG_SRC_DIR)mk/cfg/*.mk)
 
 define ADD_INSTALLED_OBJECTS
-  INSTALLED_OBJECTS_$(1) += $$(call CFG_STATIC_LIB_NAME_$(1),morestack) \
-                            $$(call CFG_STATIC_LIB_NAME_$(1),compiler-rt)
+  INSTALLED_OBJECTS_$(1) += $$(CFG_INSTALLED_OBJECTS_$(1))
+  REQUIRED_OBJECTS_$(1) += $$(CFG_THIRD_PARTY_OBJECTS_$(1))
+  INSTALLED_OBJECTS_$(1) += $$(call CFG_STATIC_LIB_NAME_$(1),compiler-rt)
+  REQUIRED_OBJECTS_$(1) += $$(call CFG_STATIC_LIB_NAME_$(1),compiler-rt)
 endef
 
 $(foreach target,$(CFG_TARGET), \
@@ -128,6 +117,18 @@ endef
 
 $(foreach target,$(CFG_TARGET), \
   $(eval $(call DEFINE_LINKER,$(target))))
+
+define ADD_JEMALLOC_DEP
+  ifndef CFG_DISABLE_JEMALLOC_$(1)
+    ifndef CFG_DISABLE_JEMALLOC
+      RUST_DEPS_std_T_$(1) += alloc_jemalloc
+      TARGET_CRATES_$(1) += alloc_jemalloc
+    endif
+  endif
+endef
+
+$(foreach target,$(CFG_TARGET), \
+  $(eval $(call ADD_JEMALLOC_DEP,$(target))))
 
 # The -Qunused-arguments sidesteps spurious warnings from clang
 define FILTER_FLAGS
@@ -187,21 +188,25 @@ define CFG_MAKE_TOOLCHAIN
   endif
 
   CFG_COMPILE_C_$(1) = $$(CC_$(1)) \
+        $$(CFLAGS) \
         $$(CFG_GCCISH_CFLAGS) \
         $$(CFG_GCCISH_CFLAGS_$(1)) \
         -c $$(call CFG_CC_OUTPUT_$(1),$$(1)) $$(2)
   CFG_LINK_C_$(1) = $$(CC_$(1)) \
+        $$(LDFLAGS) \
         $$(CFG_GCCISH_LINK_FLAGS) -o $$(1) \
         $$(CFG_GCCISH_LINK_FLAGS_$(1)) \
         $$(CFG_GCCISH_DEF_FLAG_$(1))$$(3) $$(2) \
         $$(call CFG_INSTALL_NAME_$(1),$$(4))
   CFG_COMPILE_CXX_$(1) = $$(CXX_$(1)) \
+        $$(CXXFLAGS) \
         $$(CFG_GCCISH_CFLAGS) \
         $$(CFG_GCCISH_CXXFLAGS) \
         $$(CFG_GCCISH_CFLAGS_$(1)) \
         $$(CFG_GCCISH_CXXFLAGS_$(1)) \
         -c $$(call CFG_CC_OUTPUT_$(1),$$(1)) $$(2)
   CFG_LINK_CXX_$(1) = $$(CXX_$(1)) \
+        $$(LDFLAGS) \
         $$(CFG_GCCISH_LINK_FLAGS) -o $$(1) \
         $$(CFG_GCCISH_LINK_FLAGS_$(1)) \
         $$(CFG_GCCISH_DEF_FLAG_$(1))$$(3) $$(2) \
@@ -238,56 +243,3 @@ endef
 
 $(foreach target,$(CFG_TARGET), \
   $(eval $(call CFG_MAKE_TOOLCHAIN,$(target))))
-
-# There are more comments about this available in the target specification for
-# Windows MSVC in the compiler, but the gist of it is that we use `llvm-ar.exe`
-# instead of `lib.exe` for assembling archives, so we need to inject this custom
-# dependency here.
-define ADD_LLVM_AR_TO_MSVC_DEPS
-ifeq ($$(findstring msvc,$(1)),msvc)
-NATIVE_TOOL_DEPS_core_T_$(1) += llvm-ar.exe
-INSTALLED_BINS_$(1) += llvm-ar.exe
-endif
-endef
-
-$(foreach target,$(CFG_TARGET), \
-  $(eval $(call ADD_LLVM_AR_TO_MSVC_DEPS,$(target))))
-
-# When working with MSVC on windows, each DLL needs to explicitly declare its
-# interface to the outside world through some means. The options for doing so
-# include:
-#
-# 1. A custom attribute on each function itself
-# 2. A linker argument saying what to export
-# 3. A file which lists all symbols that need to be exported
-#
-# The Rust compiler takes care (1) for us for all Rust code by annotating all
-# public-facing functions with dllexport, but we have a few native dependencies
-# which need to cross the DLL boundary. The most important of these dependencies
-# is LLVM which is linked into `rustc_llvm.dll` but primarily used from
-# `rustc_trans.dll`. This means that many of LLVM's C API functions need to be
-# exposed from `rustc_llvm.dll` to be forwarded over the boundary.
-#
-# Unfortunately, at this time, LLVM does not handle this sort of exportation on
-# Windows for us, so we're forced to do it ourselves if we want it (which seems
-# like the path of least resistance right now). To do this we generate a `.DEF`
-# file [1] which we then custom-pass to the linker when building the rustc_llvm
-# crate. This DEF file list all symbols that are exported from
-# `src/librustc_llvm/lib.rs` and is generated by a small python script.
-#
-# Fun times!
-#
-# [1]: https://msdn.microsoft.com/en-us/library/28d6s79h.aspx
-define ADD_RUSTC_LLVM_DEF_TO_MSVC
-ifeq ($$(findstring msvc,$(1)),msvc)
-RUSTFLAGS_rustc_llvm_T_$(1) += -C link-args="-DEF:$(1)/rt/rustc_llvm.def"
-CUSTOM_DEPS_rustc_llvm_T_$(1) += $(1)/rt/rustc_llvm.def
-
-$(1)/rt/rustc_llvm.def: $$(S)src/etc/mklldef.py $$(S)src/librustc_llvm/lib.rs
-	$$(CFG_PYTHON) $$^ $$@ rustc_llvm-$$(CFG_FILENAME_EXTRA)
-endif
-endef
-
-$(foreach target,$(CFG_TARGET), \
-  $(eval $(call ADD_RUSTC_LLVM_DEF_TO_MSVC,$(target))))
-

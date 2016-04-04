@@ -15,19 +15,20 @@
 use self::Fragment::*;
 
 use borrowck::InteriorKind::{InteriorField, InteriorElement};
-use borrowck::LoanPath;
+use borrowck::{self, LoanPath};
 use borrowck::LoanPathKind::{LpVar, LpUpvar, LpDowncast, LpExtend};
 use borrowck::LoanPathElem::{LpDeref, LpInterior};
 use borrowck::move_data::InvalidMovePathIndex;
 use borrowck::move_data::{MoveData, MovePathIndex};
-use rustc::middle::ty;
+use rustc::middle::def_id::{DefId};
+use rustc::ty::{self, TyCtxt};
 use rustc::middle::mem_categorization as mc;
 
 use std::mem;
 use std::rc::Rc;
 use syntax::ast;
+use syntax::codemap::{Span, DUMMY_SP};
 use syntax::attr::AttrMetaMethods;
-use syntax::codemap::Span;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 enum Fragment {
@@ -59,6 +60,84 @@ impl Fragment {
     }
 }
 
+pub fn build_unfragmented_map(this: &mut borrowck::BorrowckCtxt,
+                              move_data: &MoveData,
+                              id: ast::NodeId) {
+    let fr = &move_data.fragments.borrow();
+
+    // For now, don't care about other kinds of fragments; the precise
+    // classfication of all paths for non-zeroing *drop* needs them,
+    // but the loose approximation used by non-zeroing moves does not.
+    let moved_leaf_paths = fr.moved_leaf_paths();
+    let assigned_leaf_paths = fr.assigned_leaf_paths();
+
+    let mut fragment_infos = Vec::with_capacity(moved_leaf_paths.len());
+
+    let find_var_id = |move_path_index: MovePathIndex| -> Option<ast::NodeId> {
+        let lp = move_data.path_loan_path(move_path_index);
+        match lp.kind {
+            LpVar(var_id) => Some(var_id),
+            LpUpvar(ty::UpvarId { var_id, closure_expr_id }) => {
+                // The `var_id` is unique *relative to* the current function.
+                // (Check that we are indeed talking about the same function.)
+                assert_eq!(id, closure_expr_id);
+                Some(var_id)
+            }
+            LpDowncast(..) | LpExtend(..) => {
+                // This simple implementation of non-zeroing move does
+                // not attempt to deal with tracking substructure
+                // accurately in the general case.
+                None
+            }
+        }
+    };
+
+    let moves = move_data.moves.borrow();
+    for &move_path_index in moved_leaf_paths {
+        let var_id = match find_var_id(move_path_index) {
+            None => continue,
+            Some(var_id) => var_id,
+        };
+
+        move_data.each_applicable_move(move_path_index, |move_index| {
+            let info = ty::FragmentInfo::Moved {
+                var: var_id,
+                move_expr: moves[move_index.get()].id,
+            };
+            debug!("fragment_infos push({:?} \
+                    due to move_path_index: {} move_index: {}",
+                   info, move_path_index.get(), move_index.get());
+            fragment_infos.push(info);
+            true
+        });
+    }
+
+    for &move_path_index in assigned_leaf_paths {
+        let var_id = match find_var_id(move_path_index) {
+            None => continue,
+            Some(var_id) => var_id,
+        };
+
+        let var_assigns = move_data.var_assignments.borrow();
+        for var_assign in var_assigns.iter()
+            .filter(|&assign| assign.path == move_path_index)
+        {
+            let info = ty::FragmentInfo::Assigned {
+                var: var_id,
+                assign_expr: var_assign.id,
+                assignee_id: var_assign.assignee_id,
+            };
+            debug!("fragment_infos push({:?} due to var_assignment", info);
+            fragment_infos.push(info);
+        }
+    }
+
+    let mut fraginfo_map = this.tcx.fragment_infos.borrow_mut();
+    let fn_did = this.tcx.map.local_def_id(id);
+    let prev = fraginfo_map.insert(fn_did, fragment_infos);
+    assert!(prev.is_none());
+}
+
 pub struct FragmentSets {
     /// During move_data construction, `moved_leaf_paths` tracks paths
     /// that have been used directly by being moved out of.  When
@@ -80,7 +159,7 @@ pub struct FragmentSets {
     /// FIXME(pnkfelix) probably do not want/need
     /// `parents_of_fragments` at all, if we can avoid it.
     ///
-    /// Update: I do not see a way to to avoid it.  Maybe just remove
+    /// Update: I do not see a way to avoid it.  Maybe just remove
     /// above fixme, or at least document why doing this may be hard.
     parents_of_fragments: Vec<MovePathIndex>,
 
@@ -103,6 +182,14 @@ impl FragmentSets {
         }
     }
 
+    pub fn moved_leaf_paths(&self) -> &[MovePathIndex] {
+        &self.moved_leaf_paths
+    }
+
+    pub fn assigned_leaf_paths(&self) -> &[MovePathIndex] {
+        &self.assigned_leaf_paths
+    }
+
     pub fn add_move(&mut self, path_index: MovePathIndex) {
         self.moved_leaf_paths.push(path_index);
     }
@@ -113,7 +200,7 @@ impl FragmentSets {
 }
 
 pub fn instrument_move_fragments<'tcx>(this: &MoveData<'tcx>,
-                                       tcx: &ty::ctxt<'tcx>,
+                                       tcx: &TyCtxt<'tcx>,
                                        sp: Span,
                                        id: ast::NodeId) {
     let span_err = tcx.map.attrs(id).iter()
@@ -158,7 +245,7 @@ pub fn instrument_move_fragments<'tcx>(this: &MoveData<'tcx>,
 ///
 /// Note: "left-over fragments" means paths that were not directly referenced in moves nor
 /// assignments, but must nonetheless be tracked as potential drop obligations.
-pub fn fixup_fragment_sets<'tcx>(this: &MoveData<'tcx>, tcx: &ty::ctxt<'tcx>) {
+pub fn fixup_fragment_sets<'tcx>(this: &MoveData<'tcx>, tcx: &TyCtxt<'tcx>) {
 
     let mut fragments = this.fragments.borrow_mut();
 
@@ -260,7 +347,7 @@ pub fn fixup_fragment_sets<'tcx>(this: &MoveData<'tcx>, tcx: &ty::ctxt<'tcx>) {
 /// example, if `lp` represents `s.x.j`, then adds moves paths for `s.x.i` and `s.x.k`, the
 /// siblings of `s.x.j`.
 fn add_fragment_siblings<'tcx>(this: &MoveData<'tcx>,
-                               tcx: &ty::ctxt<'tcx>,
+                               tcx: &TyCtxt<'tcx>,
                                gathered_fragments: &mut Vec<Fragment>,
                                lp: Rc<LoanPath<'tcx>>,
                                origin_id: Option<ast::NodeId>) {
@@ -292,7 +379,7 @@ fn add_fragment_siblings<'tcx>(this: &MoveData<'tcx>,
         // bind.
         //
         // Anyway, for now: LV[j] is not tracked precisely
-        LpExtend(_, _, LpInterior(InteriorElement(..))) => {
+        LpExtend(_, _, LpInterior(_, InteriorElement(..))) => {
             let mp = this.move_path(tcx, lp.clone());
             gathered_fragments.push(AllButOneFrom(mp));
         }
@@ -300,7 +387,7 @@ fn add_fragment_siblings<'tcx>(this: &MoveData<'tcx>,
         // field access LV.x and tuple access LV#k are the cases
         // we are interested in
         LpExtend(ref loan_parent, mc,
-                 LpInterior(InteriorField(ref field_name))) => {
+                 LpInterior(_, InteriorField(ref field_name))) => {
             let enum_variant_info = match loan_parent.kind {
                 LpDowncast(ref loan_parent_2, variant_def_id) =>
                     Some((variant_def_id, loan_parent_2.clone())),
@@ -319,14 +406,14 @@ fn add_fragment_siblings<'tcx>(this: &MoveData<'tcx>,
 /// We have determined that `origin_lp` destructures to LpExtend(parent, original_field_name).
 /// Based on this, add move paths for all of the siblings of `origin_lp`.
 fn add_fragment_siblings_for_extension<'tcx>(this: &MoveData<'tcx>,
-                                             tcx: &ty::ctxt<'tcx>,
+                                             tcx: &TyCtxt<'tcx>,
                                              gathered_fragments: &mut Vec<Fragment>,
                                              parent_lp: &Rc<LoanPath<'tcx>>,
                                              mc: mc::MutabilityCategory,
                                              origin_field_name: &mc::FieldName,
                                              origin_lp: &Rc<LoanPath<'tcx>>,
                                              origin_id: Option<ast::NodeId>,
-                                             enum_variant_info: Option<(ast::DefId,
+                                             enum_variant_info: Option<(DefId,
                                                                         Rc<LoanPath<'tcx>>)>) {
     let parent_ty = parent_lp.to_type();
 
@@ -341,8 +428,8 @@ fn add_fragment_siblings_for_extension<'tcx>(this: &MoveData<'tcx>,
             let tuple_idx = match *origin_field_name {
                 mc::PositionalField(tuple_idx) => tuple_idx,
                 mc::NamedField(_) =>
-                    panic!("tuple type {:?} should not have named fields.",
-                           parent_ty),
+                    bug!("tuple type {:?} should not have named fields.",
+                         parent_ty),
             };
             let tuple_len = v.len();
             for i in 0..tuple_len {
@@ -352,11 +439,10 @@ fn add_fragment_siblings_for_extension<'tcx>(this: &MoveData<'tcx>,
             }
         }
 
-        (&ty::TyStruct(def_id, ref _substs), None) => {
-            let fields = tcx.lookup_struct_fields(def_id);
+        (&ty::TyStruct(def, _), None) => {
             match *origin_field_name {
                 mc::NamedField(ast_name) => {
-                    for f in &fields {
+                    for f in &def.struct_variant().fields {
                         if f.name == ast_name {
                             continue;
                         }
@@ -365,7 +451,7 @@ fn add_fragment_siblings_for_extension<'tcx>(this: &MoveData<'tcx>,
                     }
                 }
                 mc::PositionalField(tuple_idx) => {
-                    for (i, _f) in fields.iter().enumerate() {
+                    for (i, _f) in def.struct_variant().fields.iter().enumerate() {
                         if i == tuple_idx {
                             continue
                         }
@@ -376,35 +462,26 @@ fn add_fragment_siblings_for_extension<'tcx>(this: &MoveData<'tcx>,
             }
         }
 
-        (&ty::TyEnum(enum_def_id, substs), ref enum_variant_info) => {
-            let variant_info = {
-                let mut variants = tcx.substd_enum_variants(enum_def_id, substs);
-                match *enum_variant_info {
-                    Some((variant_def_id, ref _lp2)) =>
-                        variants.iter()
-                        .find(|variant| variant.id == variant_def_id)
-                        .expect("enum_variant_with_id(): no variant exists with that ID")
-                        .clone(),
-                    None => {
-                        assert_eq!(variants.len(), 1);
-                        variants.pop().unwrap()
-                    }
+        (&ty::TyEnum(def, _), ref enum_variant_info) => {
+            let variant = match *enum_variant_info {
+                Some((vid, ref _lp2)) => def.variant_with_id(vid),
+                None => {
+                    assert!(def.is_univariant());
+                    &def.variants[0]
                 }
             };
             match *origin_field_name {
                 mc::NamedField(ast_name) => {
-                    let variant_arg_names = variant_info.arg_names.as_ref().unwrap();
-                    for &variant_arg_name in variant_arg_names {
-                        if variant_arg_name == ast_name {
+                    for field in &variant.fields {
+                        if field.name == ast_name {
                             continue;
                         }
-                        let field_name = mc::NamedField(variant_arg_name);
-                        add_fragment_sibling_local(field_name, Some(variant_info.id));
+                        let field_name = mc::NamedField(field.name);
+                        add_fragment_sibling_local(field_name, Some(variant.did));
                     }
                 }
                 mc::PositionalField(tuple_idx) => {
-                    let variant_arg_types = &variant_info.args;
-                    for (i, _variant_arg_ty) in variant_arg_types.iter().enumerate() {
+                    for (i, _f) in variant.fields.iter().enumerate() {
                         if tuple_idx == i {
                             continue;
                         }
@@ -416,10 +493,11 @@ fn add_fragment_siblings_for_extension<'tcx>(this: &MoveData<'tcx>,
         }
 
         ref sty_and_variant_info => {
-            let msg = format!("type {:?} ({:?}) is not fragmentable",
-                              parent_ty, sty_and_variant_info);
             let opt_span = origin_id.and_then(|id|tcx.map.opt_span(id));
-            tcx.sess.opt_span_bug(opt_span, &msg[..])
+            span_bug!(opt_span.unwrap_or(DUMMY_SP),
+                      "type {:?} ({:?}) is not fragmentable",
+                      parent_ty,
+                      sty_and_variant_info);
         }
     }
 }
@@ -427,19 +505,19 @@ fn add_fragment_siblings_for_extension<'tcx>(this: &MoveData<'tcx>,
 /// Adds the single sibling `LpExtend(parent, new_field_name)` of `origin_lp` (the original
 /// loan-path).
 fn add_fragment_sibling_core<'tcx>(this: &MoveData<'tcx>,
-                                   tcx: &ty::ctxt<'tcx>,
+                                   tcx: &TyCtxt<'tcx>,
                                    gathered_fragments: &mut Vec<Fragment>,
                                    parent: Rc<LoanPath<'tcx>>,
                                    mc: mc::MutabilityCategory,
                                    new_field_name: mc::FieldName,
                                    origin_lp: &Rc<LoanPath<'tcx>>,
-                                   enum_variant_did: Option<ast::DefId>) -> MovePathIndex {
+                                   enum_variant_did: Option<DefId>) -> MovePathIndex {
     let opt_variant_did = match parent.kind {
         LpDowncast(_, variant_did) => Some(variant_did),
         LpVar(..) | LpUpvar(..) | LpExtend(..) => enum_variant_did,
     };
 
-    let loan_path_elem = LpInterior(InteriorField(new_field_name));
+    let loan_path_elem = LpInterior(opt_variant_did, InteriorField(new_field_name));
     let new_lp_type = match new_field_name {
         mc::NamedField(ast_name) =>
             tcx.named_element_ty(parent.to_type(), ast_name, opt_variant_did),

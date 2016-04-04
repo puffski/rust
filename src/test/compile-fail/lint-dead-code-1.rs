@@ -8,17 +8,13 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(no_std)]
 #![no_std]
 #![allow(unused_variables)]
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
 #![deny(dead_code)]
-#![feature(core)]
 
 #![crate_type="lib"]
-
-extern crate core;
 
 pub use foo2::Bar2;
 
@@ -53,7 +49,7 @@ struct UsedStruct1 {
 }
 struct UsedStruct2(isize);
 struct UsedStruct3;
-struct UsedStruct4;
+pub struct UsedStruct4;
 // this struct is never used directly, but its method is, so we don't want
 // to warn it
 struct SemiUsedStruct;

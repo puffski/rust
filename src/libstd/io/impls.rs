@@ -8,14 +8,11 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use core::prelude::*;
-
 use boxed::Box;
 use cmp;
 use io::{self, SeekFrom, Read, Write, Seek, BufRead, Error, ErrorKind};
 use fmt;
 use mem;
-use slice;
 use string::String;
 use vec::Vec;
 
@@ -37,6 +34,11 @@ impl<'a, R: Read + ?Sized> Read for &'a mut R {
     #[inline]
     fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
         (**self).read_to_string(buf)
+    }
+
+    #[inline]
+    fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        (**self).read_exact(buf)
     }
 }
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -97,6 +99,11 @@ impl<R: Read + ?Sized> Read for Box<R> {
     fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
         (**self).read_to_string(buf)
     }
+
+    #[inline]
+    fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        (**self).read_exact(buf)
+    }
 }
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<W: Write + ?Sized> Write for Box<W> {
@@ -149,9 +156,21 @@ impl<'a> Read for &'a [u8] {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let amt = cmp::min(buf.len(), self.len());
         let (a, b) = self.split_at(amt);
-        slice::bytes::copy_memory(a, buf);
+        buf[..amt].copy_from_slice(a);
         *self = b;
         Ok(amt)
+    }
+
+    #[inline]
+    fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        if buf.len() > self.len() {
+            return Err(Error::new(ErrorKind::UnexpectedEof,
+                                  "failed to fill whole buffer"));
+        }
+        let (a, b) = self.split_at(buf.len());
+        buf.copy_from_slice(a);
+        *self = b;
+        Ok(())
     }
 }
 
@@ -170,14 +189,14 @@ impl<'a> Write for &'a mut [u8] {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
         let amt = cmp::min(data.len(), self.len());
         let (a, b) = mem::replace(self, &mut []).split_at_mut(amt);
-        slice::bytes::copy_memory(&data[..amt], a);
+        a.copy_from_slice(&data[..amt]);
         *self = b;
         Ok(amt)
     }
 
     #[inline]
     fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
-        if try!(self.write(data)) == data.len() {
+        if self.write(data)? == data.len() {
             Ok(())
         } else {
             Err(Error::new(ErrorKind::WriteZero, "failed to write whole buffer"))
@@ -192,13 +211,13 @@ impl<'a> Write for &'a mut [u8] {
 impl Write for Vec<u8> {
     #[inline]
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.push_all(buf);
+        self.extend_from_slice(buf);
         Ok(buf.len())
     }
 
     #[inline]
     fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-        self.push_all(buf);
+        self.extend_from_slice(buf);
         Ok(())
     }
 
@@ -219,7 +238,7 @@ mod tests {
 
         b.iter(|| {
             let mut rd = &buf[..];
-            for _ in (0 .. 8) {
+            for _ in 0..8 {
                 let _ = rd.read(&mut dst);
                 test::black_box(&dst);
             }
@@ -233,7 +252,7 @@ mod tests {
 
         b.iter(|| {
             let mut wr = &mut buf[..];
-            for _ in (0 .. 8) {
+            for _ in 0..8 {
                 let _ = wr.write_all(&src);
                 test::black_box(&wr);
             }
@@ -247,7 +266,7 @@ mod tests {
 
         b.iter(|| {
             let mut rd = &buf[..];
-            for _ in (0 .. 8) {
+            for _ in 0..8 {
                 let _ = rd.read(&mut dst);
                 test::black_box(&dst);
             }
@@ -261,7 +280,7 @@ mod tests {
 
         b.iter(|| {
             let mut wr = &mut buf[..];
-            for _ in (0 .. 8) {
+            for _ in 0..8 {
                 let _ = wr.write_all(&src);
                 test::black_box(&wr);
             }

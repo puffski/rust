@@ -17,9 +17,8 @@ use option::Option::{self, Some, None};
 use result;
 use sys;
 
-/// A specialized [`Result`][result] type for I/O operations.
-///
-/// [result]: ../result/enum.Result.html
+/// A specialized [`Result`](../result/enum.Result.html) type for I/O
+/// operations.
 ///
 /// This type is broadly used across `std::io` for any operation which may
 /// produce an error.
@@ -80,6 +79,7 @@ struct Custom {
 /// exhaustively match against it.
 #[derive(Copy, PartialEq, Eq, Clone, Debug)]
 #[stable(feature = "rust1", since = "1.0.0")]
+#[allow(deprecated)]
 pub enum ErrorKind {
     /// An entity was not found, often a file.
     #[stable(feature = "rust1", since = "1.0.0")]
@@ -125,6 +125,9 @@ pub enum ErrorKind {
     /// Unlike `InvalidInput`, this typically means that the operation
     /// parameters were valid, however the error was caused by malformed
     /// input data.
+    ///
+    /// For example, a function that reads a file into a string will error with
+    /// `InvalidData` if the file's contents are not valid UTF-8.
     #[stable(feature = "io_invalid_data", since = "1.2.0")]
     InvalidData,
     /// The I/O operation's timeout expired, causing it to be canceled.
@@ -147,10 +150,20 @@ pub enum ErrorKind {
     #[stable(feature = "rust1", since = "1.0.0")]
     Other,
 
+    /// An error returned when an operation could not be completed because an
+    /// "end of file" was reached prematurely.
+    ///
+    /// This typically means that an operation could only succeed if it read a
+    /// particular number of bytes but only a smaller number of bytes could be
+    /// read.
+    #[stable(feature = "read_exact", since = "1.6.0")]
+    UnexpectedEof,
+
     /// Any I/O error not part of this list.
     #[unstable(feature = "io_error_internals",
                reason = "better expressed through extensible enums that this \
-                         enum cannot be exhaustively matched against")]
+                         enum cannot be exhaustively matched against",
+               issue = "0")]
     #[doc(hidden)]
     __Nonexhaustive,
 }
@@ -178,10 +191,14 @@ impl Error {
     pub fn new<E>(kind: ErrorKind, error: E) -> Error
         where E: Into<Box<error::Error+Send+Sync>>
     {
+        Self::_new(kind, error.into())
+    }
+
+    fn _new(kind: ErrorKind, error: Box<error::Error+Send+Sync>) -> Error {
         Error {
             repr: Repr::Custom(Box::new(Custom {
                 kind: kind,
-                error: error.into(),
+                error: error,
             }))
         }
     }
@@ -219,8 +236,7 @@ impl Error {
     ///
     /// If this `Error` was constructed via `new` then this function will
     /// return `Some`, otherwise it will return `None`.
-    #[unstable(feature = "io_error_inner",
-               reason = "recently added and requires UFCS to downcast")]
+    #[stable(feature = "io_error_inner", since = "1.3.0")]
     pub fn get_ref(&self) -> Option<&(error::Error+Send+Sync+'static)> {
         match self.repr {
             Repr::Os(..) => None,
@@ -233,8 +249,7 @@ impl Error {
     ///
     /// If this `Error` was constructed via `new` then this function will
     /// return `Some`, otherwise it will return `None`.
-    #[unstable(feature = "io_error_inner",
-               reason = "recently added and requires UFCS to downcast")]
+    #[stable(feature = "io_error_inner", since = "1.3.0")]
     pub fn get_mut(&mut self) -> Option<&mut (error::Error+Send+Sync+'static)> {
         match self.repr {
             Repr::Os(..) => None,
@@ -246,8 +261,7 @@ impl Error {
     ///
     /// If this `Error` was constructed via `new` then this function will
     /// return `Some`, otherwise it will return `None`.
-    #[unstable(feature = "io_error_inner",
-               reason = "recently added and requires UFCS to downcast")]
+    #[stable(feature = "io_error_inner", since = "1.3.0")]
     pub fn into_inner(self) -> Option<Box<error::Error+Send+Sync>> {
         match self.repr {
             Repr::Os(..) => None,
@@ -267,11 +281,11 @@ impl Error {
 
 impl fmt::Debug for Repr {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            &Repr::Os(ref code) =>
+        match *self {
+            Repr::Os(ref code) =>
                 fmt.debug_struct("Os").field("code", code)
                    .field("message", &sys::os::error_string(*code)).finish(),
-            &Repr::Custom(ref c) => fmt.debug_tuple("Custom").field(c).finish(),
+            Repr::Custom(ref c) => fmt.debug_tuple("Custom").field(c).finish(),
         }
     }
 }
@@ -293,7 +307,27 @@ impl fmt::Display for Error {
 impl error::Error for Error {
     fn description(&self) -> &str {
         match self.repr {
-            Repr::Os(..) => "os error",
+            Repr::Os(..) => match self.kind() {
+                ErrorKind::NotFound => "entity not found",
+                ErrorKind::PermissionDenied => "permission denied",
+                ErrorKind::ConnectionRefused => "connection refused",
+                ErrorKind::ConnectionReset => "connection reset",
+                ErrorKind::ConnectionAborted => "connection aborted",
+                ErrorKind::NotConnected => "not connected",
+                ErrorKind::AddrInUse => "address in use",
+                ErrorKind::AddrNotAvailable => "address not available",
+                ErrorKind::BrokenPipe => "broken pipe",
+                ErrorKind::AlreadyExists => "entity already exists",
+                ErrorKind::WouldBlock => "operation would block",
+                ErrorKind::InvalidInput => "invalid input parameter",
+                ErrorKind::InvalidData => "invalid data",
+                ErrorKind::TimedOut => "timed out",
+                ErrorKind::WriteZero => "write zero",
+                ErrorKind::Interrupted => "operation interrupted",
+                ErrorKind::Other => "other os error",
+                ErrorKind::UnexpectedEof => "unexpected end of file",
+                ErrorKind::__Nonexhaustive => unreachable!()
+            },
             Repr::Custom(ref c) => c.error.description(),
         }
     }
@@ -335,7 +369,7 @@ mod test {
         struct TestError;
 
         impl fmt::Display for TestError {
-            fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+            fn fmt(&self, _: &mut fmt::Formatter) -> fmt::Result {
                 Ok(())
             }
         }
@@ -349,10 +383,10 @@ mod test {
         // we have to call all of these UFCS style right now since method
         // resolution won't implicitly drop the Send+Sync bounds
         let mut err = Error::new(ErrorKind::Other, TestError);
-        assert!(error::Error::is::<TestError>(err.get_ref().unwrap()));
+        assert!(err.get_ref().unwrap().is::<TestError>());
         assert_eq!("asdf", err.get_ref().unwrap().description());
-        assert!(error::Error::is::<TestError>(err.get_mut().unwrap()));
+        assert!(err.get_mut().unwrap().is::<TestError>());
         let extracted = err.into_inner().unwrap();
-        error::Error::downcast::<TestError>(extracted).unwrap();
+        extracted.downcast::<TestError>().unwrap();
     }
 }

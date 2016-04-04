@@ -11,11 +11,17 @@
 // ignore-test: not a test, used by backtrace-debuginfo.rs to test file!()
 
 #[inline(never)]
+#[rustc_no_mir] // FIXME #31005 MIR missing debuginfo currently.
 pub fn callback<F>(f: F) where F: FnOnce((&'static str, u32)) {
     f((file!(), line!()))
 }
 
-#[inline(always)]
+// LLVM does not yet output the required debug info to support showing inlined
+// function calls in backtraces when targetting MSVC, so disable inlining in
+// this case.
+#[cfg_attr(not(target_env = "msvc"), inline(always))]
+#[cfg_attr(target_env = "msvc", inline(never))]
+#[rustc_no_mir] // FIXME #31005 MIR missing debuginfo currently.
 pub fn callback_inlined<F>(f: F) where F: FnOnce((&'static str, u32)) {
     f((file!(), line!()))
 }

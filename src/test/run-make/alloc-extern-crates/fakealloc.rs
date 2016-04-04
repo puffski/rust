@@ -9,10 +9,7 @@
 // except according to those terms.
 
 #![crate_type = "rlib"]
-#![feature(no_std, core)]
 #![no_std]
-extern crate core;
-
 
 #[inline]
 pub unsafe fn allocate(_size: usize, _align: usize) -> *mut u8 { 0 as *mut u8 }

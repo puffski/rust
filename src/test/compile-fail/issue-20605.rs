@@ -10,10 +10,7 @@
 
 fn changer<'a>(mut things: Box<Iterator<Item=&'a mut u8>>) {
     for item in *things { *item = 0 }
-//~^ ERROR the trait `core::marker::Sized` is not implemented for the type `core::iter::Iterator
-//~^^ ERROR
-//~^^^ ERROR
-// FIXME(#21528) error should be reported once, not thrice
+//~^ ERROR the trait `std::marker::Sized` is not implemented for the type `std::iter::Iterator
 }
 
 fn main() {}

@@ -8,8 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! Operations and constants for unsigned 16-bits integers (`u16` type)
+//! The 16-bit unsigned integer type.
+//!
+//! *[See also the `u16` primitive type](../../std/primitive.u16.html).*
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
-uint_module! { u16, i16, 16 }
+uint_module! { u16, 16 }

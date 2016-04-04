@@ -8,8 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! Operations and constants for unsigned 64-bits integer (`u64` type)
+//! The 64-bit unsigned integer type.
+//!
+//! *[See also the `u64` primitive type](../../std/primitive.u64.html).*
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
-uint_module! { u64, i64, 64 }
+uint_module! { u64, 64 }

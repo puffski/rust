@@ -8,23 +8,24 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-trait Foo<T> {
-    type Out = T;
-    fn foo(&self) -> Self::Out;
+#![feature(associated_type_defaults)]
+
+trait Foo<T: Default + ToString> {
+    type Out: Default + ToString = T;
 }
 
 impl Foo<u32> for () {
-    fn foo(&self) -> u32 {
-        4u32
-    }
 }
 
-impl Foo<u64> for bool {
-    type Out = ();
-    fn foo(&self) {}
+impl Foo<u64> for () {
+    type Out = bool;
 }
 
 fn main() {
-    assert_eq!(<() as Foo<u32>>::foo(&()), 4u32);
-    assert_eq!(<bool as Foo<u64>>::foo(&true), ());
+    assert_eq!(
+        <() as Foo<u32>>::Out::default().to_string(),
+        "0");
+    assert_eq!(
+        <() as Foo<u64>>::Out::default().to_string(),
+        "false");
 }

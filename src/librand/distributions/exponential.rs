@@ -10,16 +10,16 @@
 
 //! The exponential distribution.
 
-use core::num::Float;
+use FloatMath;
 
 use {Rng, Rand};
 use distributions::{ziggurat, ziggurat_tables, Sample, IndependentSample};
 
 /// A wrapper around an `f64` to generate Exp(1) random numbers.
 ///
-/// See `Exp` for the general exponential distribution.Note that this
- // has to be unwrapped before use as an `f64` (using either
-/// `*` or `mem::transmute` is safe).
+/// See `Exp` for the general exponential distribution. Note that this has to
+/// be unwrapped before use as an `f64` (using either `*` or `mem::transmute`
+/// is safe).
 ///
 /// Implemented via the ZIGNOR variant[1] of the Ziggurat method. The
 /// exact description in the paper was adjusted to use tables for the
@@ -35,20 +35,22 @@ pub struct Exp1(pub f64);
 // This could be done via `-rng.gen::<f64>().ln()` but that is slower.
 impl Rand for Exp1 {
     #[inline]
-    fn rand<R:Rng>(rng: &mut R) -> Exp1 {
+    fn rand<R: Rng>(rng: &mut R) -> Exp1 {
         #[inline]
         fn pdf(x: f64) -> f64 {
             (-x).exp()
         }
         #[inline]
-        fn zero_case<R:Rng>(rng: &mut R, _u: f64) -> f64 {
+        fn zero_case<R: Rng>(rng: &mut R, _u: f64) -> f64 {
             ziggurat_tables::ZIG_EXP_R - rng.gen::<f64>().ln()
         }
 
-        Exp1(ziggurat(rng, false,
+        Exp1(ziggurat(rng,
+                      false,
                       &ziggurat_tables::ZIG_EXP_X,
                       &ziggurat_tables::ZIG_EXP_F,
-                      pdf, zero_case))
+                      pdf,
+                      zero_case))
     }
 }
 
@@ -59,7 +61,7 @@ impl Rand for Exp1 {
 #[derive(Copy, Clone)]
 pub struct Exp {
     /// `lambda` stored as `1/lambda`, since this is what we scale by.
-    lambda_inverse: f64
+    lambda_inverse: f64,
 }
 
 impl Exp {
@@ -72,7 +74,9 @@ impl Exp {
 }
 
 impl Sample<f64> for Exp {
-    fn sample<R: Rng>(&mut self, rng: &mut R) -> f64 { self.ind_sample(rng) }
+    fn sample<R: Rng>(&mut self, rng: &mut R) -> f64 {
+        self.ind_sample(rng)
+    }
 }
 impl IndependentSample<f64> for Exp {
     fn ind_sample<R: Rng>(&self, rng: &mut R) -> f64 {
@@ -83,8 +87,6 @@ impl IndependentSample<f64> for Exp {
 
 #[cfg(test)]
 mod tests {
-    use std::prelude::v1::*;
-
     use distributions::{Sample, IndependentSample};
     use super::Exp;
 
@@ -112,8 +114,6 @@ mod tests {
 #[cfg(test)]
 mod bench {
     extern crate test;
-
-    use std::prelude::v1::*;
 
     use self::test::Bencher;
     use std::mem::size_of;

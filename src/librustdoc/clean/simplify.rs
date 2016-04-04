@@ -11,7 +11,7 @@
 //! Simplification of where clauses and parameter bounds into a prettier and
 //! more canonical form.
 //!
-//! Currently all cross-crate-inlined function use `middle::ty` to reconstruct
+//! Currently all cross-crate-inlined function use `rustc::ty` to reconstruct
 //! the AST (e.g. see all of `clean::inline`), but this is not always a
 //! non-lossy transformation. The current format of storage for where clauses
 //! for functions and such is simply a list of predicates. One example of this
@@ -29,8 +29,8 @@
 use std::mem;
 use std::collections::HashMap;
 
-use rustc::middle::subst;
-use syntax::ast;
+use rustc::middle::def_id::DefId;
+use rustc::ty::subst;
 
 use clean::PathParameters as PP;
 use clean::WherePredicate as WP;
@@ -148,8 +148,8 @@ fn ty_bounds(bounds: Vec<clean::TyParamBound>) -> Vec<clean::TyParamBound> {
     bounds
 }
 
-fn trait_is_same_or_supertrait(cx: &DocContext, child: ast::DefId,
-                               trait_: ast::DefId) -> bool {
+fn trait_is_same_or_supertrait(cx: &DocContext, child: DefId,
+                               trait_: DefId) -> bool {
     if child == trait_ {
         return true
     }

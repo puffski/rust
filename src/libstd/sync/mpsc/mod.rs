@@ -265,8 +265,6 @@
 // And now that you've seen all the races that I found and attempted to fix,
 // here's the code for you to find some more!
 
-use prelude::v1::*;
-
 use sync::Arc;
 use error;
 use fmt;
@@ -274,6 +272,7 @@ use mem;
 use cell::UnsafeCell;
 use marker::Reflect;
 
+#[unstable(feature = "mpsc_select", issue = "27800")]
 pub use self::select::{Select, Handle};
 use self::select::StartResult;
 use self::select::StartResult::*;
@@ -297,7 +296,11 @@ pub struct Receiver<T> {
 
 // The receiver port can be sent from place to place, so long as it
 // is not used to receive non-sendable things.
+#[stable(feature = "rust1", since = "1.0.0")]
 unsafe impl<T: Send> Send for Receiver<T> { }
+
+#[stable(feature = "rust1", since = "1.0.0")]
+impl<T> !Sync for Receiver<T> { }
 
 /// An iterator over messages on a receiver, this iterator will block
 /// whenever `next` is called, waiting for a new message, and `None` will be
@@ -324,7 +327,11 @@ pub struct Sender<T> {
 
 // The send port can be sent from place to place, so long as it
 // is not used to send non-sendable things.
+#[stable(feature = "rust1", since = "1.0.0")]
 unsafe impl<T: Send> Send for Sender<T> { }
+
+#[stable(feature = "rust1", since = "1.0.0")]
+impl<T> !Sync for Sender<T> { }
 
 /// The sending-half of Rust's synchronous channel type. This half can only be
 /// owned by one thread, but it can be cloned to send to other threads.
@@ -333,8 +340,10 @@ pub struct SyncSender<T> {
     inner: Arc<UnsafeCell<sync::Packet<T>>>,
 }
 
+#[stable(feature = "rust1", since = "1.0.0")]
 unsafe impl<T: Send> Send for SyncSender<T> {}
 
+#[stable(feature = "rust1", since = "1.0.0")]
 impl<T> !Sync for SyncSender<T> {}
 
 /// An error returned from the `send` function on channels.
@@ -382,12 +391,12 @@ pub enum TrySendError<T> {
     /// this is not a buffered channel, then there is no receiver available to
     /// acquire the data.
     #[stable(feature = "rust1", since = "1.0.0")]
-    Full(T),
+    Full(#[stable(feature = "rust1", since = "1.0.0")] T),
 
     /// This channel's receiving half has disconnected, so the data could not be
     /// sent. The data is returned back to the callee in this case.
     #[stable(feature = "rust1", since = "1.0.0")]
-    Disconnected(T),
+    Disconnected(#[stable(feature = "rust1", since = "1.0.0")] T),
 }
 
 enum Flavor<T> {
@@ -399,21 +408,21 @@ enum Flavor<T> {
 
 #[doc(hidden)]
 trait UnsafeFlavor<T> {
-    fn inner_unsafe<'a>(&'a self) -> &'a UnsafeCell<Flavor<T>>;
-    unsafe fn inner_mut<'a>(&'a self) -> &'a mut Flavor<T> {
+    fn inner_unsafe(&self) -> &UnsafeCell<Flavor<T>>;
+    unsafe fn inner_mut(&self) -> &mut Flavor<T> {
         &mut *self.inner_unsafe().get()
     }
-    unsafe fn inner<'a>(&'a self) -> &'a Flavor<T> {
+    unsafe fn inner(&self) -> &Flavor<T> {
         &*self.inner_unsafe().get()
     }
 }
 impl<T> UnsafeFlavor<T> for Sender<T> {
-    fn inner_unsafe<'a>(&'a self) -> &'a UnsafeCell<Flavor<T>> {
+    fn inner_unsafe(&self) -> &UnsafeCell<Flavor<T>> {
         &self.inner
     }
 }
 impl<T> UnsafeFlavor<T> for Receiver<T> {
-    fn inner_unsafe<'a>(&'a self) -> &'a UnsafeCell<Flavor<T>> {
+    fn inner_unsafe(&self) -> &UnsafeCell<Flavor<T>> {
         &self.inner
     }
 }
@@ -429,7 +438,7 @@ impl<T> UnsafeFlavor<T> for Receiver<T> {
 /// use std::sync::mpsc::channel;
 /// use std::thread;
 ///
-/// // tx is is the sending half (tx for transmission), and rx is the receiving
+/// // tx is the sending half (tx for transmission), and rx is the receiving
 /// // half (rx for receiving).
 /// let (tx, rx) = channel();
 ///
@@ -632,6 +641,13 @@ impl<T> Drop for Sender<T> {
     }
 }
 
+#[stable(feature = "mpsc_debug", since = "1.7.0")]
+impl<T> fmt::Debug for Sender<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Sender {{ .. }}")
+    }
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // SyncSender
 ////////////////////////////////////////////////////////////////////////////////
@@ -679,7 +695,7 @@ impl<T> SyncSender<T> {
 impl<T> Clone for SyncSender<T> {
     fn clone(&self) -> SyncSender<T> {
         unsafe { (*self.inner.get()).clone_chan(); }
-        return SyncSender::new(self.inner.clone());
+        SyncSender::new(self.inner.clone())
     }
 }
 
@@ -687,6 +703,13 @@ impl<T> Clone for SyncSender<T> {
 impl<T> Drop for SyncSender<T> {
     fn drop(&mut self) {
         unsafe { (*self.inner.get()).drop_chan(); }
+    }
+}
+
+#[stable(feature = "mpsc_debug", since = "1.7.0")]
+impl<T> fmt::Debug for SyncSender<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "SyncSender {{ .. }}")
     }
 }
 
@@ -956,6 +979,7 @@ impl<'a, T> IntoIterator for &'a Receiver<T> {
     fn into_iter(self) -> Iter<'a, T> { self.iter() }
 }
 
+#[stable(feature = "receiver_into_iter", since = "1.1.0")]
 impl<T> Iterator for IntoIter<T> {
     type Item = T;
     fn next(&mut self) -> Option<T> { self.rx.recv().ok() }
@@ -980,6 +1004,13 @@ impl<T> Drop for Receiver<T> {
             Flavor::Shared(ref mut p) => unsafe { (*p.get()).drop_port(); },
             Flavor::Sync(ref mut p) => unsafe { (*p.get()).drop_port(); },
         }
+    }
+}
+
+#[stable(feature = "mpsc_debug", since = "1.7.0")]
+impl<T> fmt::Debug for Receiver<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "Receiver {{ .. }}")
     }
 }
 
@@ -1107,7 +1138,7 @@ impl error::Error for TryRecvError {
 mod tests {
     use prelude::v1::*;
 
-    use std::env;
+    use env;
     use super::*;
     use thread;
 
@@ -1655,7 +1686,7 @@ mod tests {
 mod sync_tests {
     use prelude::v1::*;
 
-    use std::env;
+    use env;
     use thread;
     use super::*;
 
@@ -2194,5 +2225,23 @@ mod sync_tests {
         for _ in 0..100 {
             repro()
         }
+    }
+
+    #[test]
+    fn fmt_debug_sender() {
+        let (tx, _) = channel::<i32>();
+        assert_eq!(format!("{:?}", tx), "Sender { .. }");
+    }
+
+    #[test]
+    fn fmt_debug_recv() {
+        let (_, rx) = channel::<i32>();
+        assert_eq!(format!("{:?}", rx), "Receiver { .. }");
+    }
+
+    #[test]
+    fn fmt_debug_sync_sender() {
+        let (tx, _) = sync_channel::<i32>(1);
+        assert_eq!(format!("{:?}", tx), "SyncSender { .. }");
     }
 }

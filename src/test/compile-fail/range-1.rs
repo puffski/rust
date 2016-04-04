@@ -13,16 +13,15 @@
 pub fn main() {
     // Mixed types.
     let _ = 0u32..10i32;
-    //~^ ERROR start and end of range have incompatible types
+    //~^ ERROR mismatched types
 
     // Bool => does not implement iterator.
     for i in false..true {}
-    //~^ ERROR the trait
-    //~^^ ERROR the trait
-    //~^^^ ERROR the trait
+    //~^ ERROR E0277
 
     // Unsized type.
     let arr: &[_] = &[1, 2, 3];
     let range = *arr..;
-    //~^ ERROR the trait `core::marker::Sized` is not implemented
+    //~^ ERROR the trait `std::marker::Sized` is not implemented
+    //~| ERROR the trait `std::marker::Sized` is not implemented
 }

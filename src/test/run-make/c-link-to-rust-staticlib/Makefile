@@ -1,16 +1,13 @@
 -include ../tools.mk
 
-ifndef IS_WINDOWS
-EXTRAFLAGS := $(EXTRACFLAGS)
-endif
-
 # FIXME: ignore freebsd
 ifneq ($(shell uname),FreeBSD)
 all:
 	$(RUSTC) foo.rs
-	$(CC) bar.c -lfoo -o $(call RUN_BINFILE,bar) $(EXTRAFLAGS) $(EXTRACXXFLAGS)
+	$(CC) bar.c $(call STATICLIB,foo) $(call OUT_EXE,bar) \
+		$(EXTRACFLAGS) $(EXTRACXXFLAGS)
 	$(call RUN,bar)
-	rm $(call STATICLIB,foo*)
+	rm $(call STATICLIB,foo)
 	$(call RUN,bar)
 
 else

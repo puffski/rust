@@ -14,13 +14,14 @@
 
 extern crate syntax;
 extern crate rustc;
+extern crate rustc_plugin;
 
-use syntax::ast::{self, TokenTree, Item, MetaItem, ImplItem, TraitItem};
+use syntax::ast::{self, TokenTree, Item, MetaItem, ImplItem, TraitItem, ItemKind};
 use syntax::codemap::Span;
 use syntax::ext::base::*;
 use syntax::parse::{self, token};
 use syntax::ptr::P;
-use rustc::plugin::Registry;
+use rustc_plugin::Registry;
 
 #[macro_export]
 macro_rules! exported_macro { () => (2) }
@@ -30,10 +31,6 @@ macro_rules! unexported_macro { () => (3) }
 pub fn plugin_registrar(reg: &mut Registry) {
     reg.register_macro("make_a_1", expand_make_a_1);
     reg.register_macro("identity", expand_identity);
-    reg.register_syntax_extension(
-        token::intern("into_foo"),
-        // FIXME (#22405): Replace `Box::new` with `box` here when/if possible.
-        Modifier(Box::new(expand_into_foo)));
     reg.register_syntax_extension(
         token::intern("into_multi_foo"),
         // FIXME (#22405): Replace `Box::new` with `box` here when/if possible.
@@ -58,16 +55,8 @@ fn expand_identity(cx: &mut ExtCtxt, _span: Span, tts: &[TokenTree])
     // Parse an expression and emit it unchanged.
     let mut parser = parse::new_parser_from_tts(cx.parse_sess(),
         cx.cfg(), tts.to_vec());
-    let expr = parser.parse_expr();
+    let expr = parser.parse_expr().unwrap();
     MacEager::expr(quote_expr!(&mut *cx, $expr))
-}
-
-fn expand_into_foo(cx: &mut ExtCtxt, sp: Span, attr: &MetaItem, it: P<Item>)
-                   -> P<Item> {
-    P(Item {
-        attrs: it.attrs.clone(),
-        ..(*quote_item!(cx, enum Foo { Bar, Baz }).unwrap()).clone()
-    })
 }
 
 fn expand_into_foo_multi(cx: &mut ExtCtxt,
@@ -84,8 +73,8 @@ fn expand_into_foo_multi(cx: &mut ExtCtxt,
         Annotatable::ImplItem(it) => {
             quote_item!(cx, impl X { fn foo(&self) -> i32 { 42 } }).unwrap().and_then(|i| {
                 match i.node {
-                    ast::ItemImpl(_, _, _, _, _, mut items) => {
-                        Annotatable::ImplItem(items.pop().expect("impl method not found"))
+                    ItemKind::Impl(_, _, _, _, _, mut items) => {
+                        Annotatable::ImplItem(P(items.pop().expect("impl method not found")))
                     }
                     _ => unreachable!("impl parsed to something other than impl")
                 }
@@ -94,8 +83,8 @@ fn expand_into_foo_multi(cx: &mut ExtCtxt,
         Annotatable::TraitItem(it) => {
             quote_item!(cx, trait X { fn foo(&self) -> i32 { 0 } }).unwrap().and_then(|i| {
                 match i.node {
-                    ast::ItemTrait(_, _, _, mut items) => {
-                        Annotatable::TraitItem(items.pop().expect("trait method not found"))
+                    ItemKind::Trait(_, _, _, mut items) => {
+                        Annotatable::TraitItem(P(items.pop().expect("trait method not found")))
                     }
                     _ => unreachable!("trait parsed to something other than trait")
                 }
@@ -112,8 +101,8 @@ fn expand_duplicate(cx: &mut ExtCtxt,
                     push: &mut FnMut(Annotatable))
 {
     let copy_name = match mi.node {
-        ast::MetaItem_::MetaList(_, ref xs) => {
-            if let ast::MetaItem_::MetaWord(ref w) = xs[0].node {
+        ast::MetaItemKind::List(_, ref xs) => {
+            if let ast::MetaItemKind::Word(ref w) = xs[0].node {
                 token::str_to_ident(&w)
             } else {
                 cx.span_err(mi.span, "Expected word");

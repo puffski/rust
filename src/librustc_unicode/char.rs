@@ -8,64 +8,75 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! A Unicode scalar value
+//! A character type.
 //!
-//! This module provides the `CharExt` trait, as well as its
-//! implementation for the primitive `char` type, in order to allow
-//! basic character manipulation.
+//! The `char` type represents a single character. More specifically, since
+//! 'character' isn't a well-defined concept in Unicode, `char` is a '[Unicode
+//! scalar value]', which is similar to, but not the same as, a '[Unicode code
+//! point]'.
 //!
-//! A `char` represents a
-//! *[Unicode scalar
-//! value](http://www.unicode.org/glossary/#unicode_scalar_value)*, as it can
-//! contain any Unicode code point except high-surrogate and low-surrogate code
-//! points.
+//! [Unicode scalar value]: http://www.unicode.org/glossary/#unicode_scalar_value
+//! [Unicode code point]: http://www.unicode.org/glossary/#code_point
 //!
-//! As such, only values in the ranges \[0x0,0xD7FF\] and \[0xE000,0x10FFFF\]
-//! (inclusive) are allowed. A `char` can always be safely cast to a `u32`;
-//! however the converse is not always true due to the above range limits
-//! and, as such, should be performed via the `from_u32` function.
+//! This module exists for technical reasons, the primary documentation for
+//! `char` is directly on [the `char` primitive type](../../std/primitive.char.html)
+//! itself.
 //!
-//! *[See also the `char` primitive type](../primitive.char.html).*
+//! This module is the home of the iterator implementations for the iterators
+//! implemented on `char`, as well as some useful constants and conversion
+//! functions that convert various types to `char`.
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
 use core::char::CharExt as C;
 use core::option::Option::{self, Some, None};
 use core::iter::Iterator;
-use tables::{derived_property, property, general_category, conversions, charwidth};
+use tables::{derived_property, property, general_category, conversions};
 
 // stable reexports
-pub use core::char::{MAX, from_u32, from_u32_unchecked, from_digit, EscapeUnicode, EscapeDefault};
+#[stable(feature = "rust1", since = "1.0.0")]
+pub use core::char::{MAX, from_u32, from_u32_unchecked, from_digit};
+#[stable(feature = "rust1", since = "1.0.0")]
+pub use core::char::{EscapeUnicode, EscapeDefault, EncodeUtf8, EncodeUtf16};
 
 // unstable reexports
-#[allow(deprecated)]
-pub use normalize::{decompose_canonical, decompose_compatible, compose};
-#[allow(deprecated)]
-pub use tables::normalization::canonical_combining_class;
+#[unstable(feature = "unicode", issue = "27783")]
 pub use tables::UNICODE_VERSION;
 
-/// An iterator over the lowercase mapping of a given character, returned from
-/// the [`to_lowercase` method](../primitive.char.html#method.to_lowercase) on
-/// characters.
+/// Returns an iterator that yields the lowercase equivalent of a `char`.
+///
+/// This `struct` is created by the [`to_lowercase()`] method on [`char`]. See
+/// its documentation for more.
+///
+/// [`to_lowercase()`]: ../../std/primitive.char.html#method.to_lowercase
+/// [`char`]: ../../std/primitive.char.html
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct ToLowercase(CaseMappingIter);
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl Iterator for ToLowercase {
     type Item = char;
-    fn next(&mut self) -> Option<char> { self.0.next() }
+    fn next(&mut self) -> Option<char> {
+        self.0.next()
+    }
 }
 
-/// An iterator over the uppercase mapping of a given character, returned from
-/// the [`to_uppercase` method](../primitive.char.html#method.to_uppercase) on
-/// characters.
+/// Returns an iterator that yields the uppercase equivalent of a `char`.
+///
+/// This `struct` is created by the [`to_uppercase()`] method on [`char`]. See
+/// its documentation for more.
+///
+/// [`to_uppercase()`]: ../../std/primitive.char.html#method.to_uppercase
+/// [`char`]: ../../std/primitive.char.html
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct ToUppercase(CaseMappingIter);
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl Iterator for ToUppercase {
     type Item = char;
-    fn next(&mut self) -> Option<char> { self.0.next() }
+    fn next(&mut self) -> Option<char> {
+        self.0.next()
+    }
 }
 
 
@@ -73,7 +84,7 @@ enum CaseMappingIter {
     Three(char, char, char),
     Two(char, char),
     One(char),
-    Zero
+    Zero,
 }
 
 impl CaseMappingIter {
@@ -111,69 +122,123 @@ impl Iterator for CaseMappingIter {
     }
 }
 
-#[stable(feature = "rust1", since = "1.0.0")]
 #[lang = "char"]
 impl char {
-    /// Checks if a `char` parses as a numeric digit in the given radix.
+    /// Checks if a `char` is a digit in the given radix.
+    ///
+    /// A 'radix' here is sometimes also called a 'base'. A radix of two
+    /// indicates a binary number, a radix of ten, decimal, and a radix of
+    /// sixteen, hexadecimal, to give some common values. Arbitrary
+    /// radicum are supported.
     ///
     /// Compared to `is_numeric()`, this function only recognizes the characters
     /// `0-9`, `a-z` and `A-Z`.
     ///
-    /// # Return value
+    /// 'Digit' is defined to be only the following characters:
     ///
-    /// Returns `true` if `c` is a valid digit under `radix`, and `false`
-    /// otherwise.
+    /// * `0-9`
+    /// * `a-z`
+    /// * `A-Z`
+    ///
+    /// For a more comprehensive understanding of 'digit', see [`is_numeric()`][is_numeric].
+    ///
+    /// [is_numeric]: #method.is_numeric
     ///
     /// # Panics
     ///
-    /// Panics if given a radix > 36.
+    /// Panics if given a radix larger than 36.
     ///
     /// # Examples
     ///
+    /// Basic usage:
+    ///
     /// ```
-    /// let c = '1';
-    ///
-    /// assert!(c.is_digit(10));
-    ///
+    /// assert!('1'.is_digit(10));
     /// assert!('f'.is_digit(16));
+    /// assert!(!'f'.is_digit(10));
+    /// ```
+    ///
+    /// Passing a large radix, causing a panic:
+    ///
+    /// ```
+    /// use std::thread;
+    ///
+    /// let result = thread::spawn(|| {
+    ///     // this panics
+    ///     '1'.is_digit(37);
+    /// }).join();
+    ///
+    /// assert!(result.is_err());
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn is_digit(self, radix: u32) -> bool { C::is_digit(self, radix) }
+    pub fn is_digit(self, radix: u32) -> bool {
+        C::is_digit(self, radix)
+    }
 
-    /// Converts a character to the corresponding digit.
+    /// Converts a `char` to a digit in the given radix.
     ///
-    /// # Return value
+    /// A 'radix' here is sometimes also called a 'base'. A radix of two
+    /// indicates a binary number, a radix of ten, decimal, and a radix of
+    /// sixteen, hexadecimal, to give some common values. Arbitrary
+    /// radicum are supported.
     ///
-    /// If `c` is between '0' and '9', the corresponding value between 0 and
-    /// 9. If `c` is 'a' or 'A', 10. If `c` is 'b' or 'B', 11, etc. Returns
-    /// none if the character does not refer to a digit in the given radix.
+    /// 'Digit' is defined to be only the following characters:
+    ///
+    /// * `0-9`
+    /// * `a-z`
+    /// * `A-Z`
+    ///
+    /// # Errors
+    ///
+    /// Returns `None` if the `char` does not refer to a digit in the given radix.
     ///
     /// # Panics
     ///
-    /// Panics if given a radix outside the range [0..36].
+    /// Panics if given a radix larger than 36.
     ///
     /// # Examples
     ///
+    /// Basic usage:
+    ///
     /// ```
-    /// let c = '1';
-    ///
-    /// assert_eq!(c.to_digit(10), Some(1));
-    ///
+    /// assert_eq!('1'.to_digit(10), Some(1));
     /// assert_eq!('f'.to_digit(16), Some(15));
     /// ```
+    ///
+    /// Passing a non-digit results in failure:
+    ///
+    /// ```
+    /// assert_eq!('f'.to_digit(10), None);
+    /// assert_eq!('z'.to_digit(16), None);
+    /// ```
+    ///
+    /// Passing a large radix, causing a panic:
+    ///
+    /// ```
+    /// use std::thread;
+    ///
+    /// let result = thread::spawn(|| {
+    ///     '1'.to_digit(37);
+    /// }).join();
+    ///
+    /// assert!(result.is_err());
+    /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn to_digit(self, radix: u32) -> Option<u32> { C::to_digit(self, radix) }
+    pub fn to_digit(self, radix: u32) -> Option<u32> {
+        C::to_digit(self, radix)
+    }
 
     /// Returns an iterator that yields the hexadecimal Unicode escape of a
     /// character, as `char`s.
     ///
     /// All characters are escaped with Rust syntax of the form `\\u{NNNN}`
-    /// where `NNNN` is the shortest hexadecimal representation of the code
-    /// point.
+    /// where `NNNN` is the shortest hexadecimal representation.
     ///
     /// # Examples
+    ///
+    /// Basic usage:
     ///
     /// ```
     /// for c in '❤'.escape_unicode() {
@@ -197,22 +262,32 @@ impl char {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn escape_unicode(self) -> EscapeUnicode { C::escape_unicode(self) }
+    pub fn escape_unicode(self) -> EscapeUnicode {
+        C::escape_unicode(self)
+    }
 
-    /// Returns an iterator that yields the 'default' ASCII and
-    /// C++11-like literal escape of a character, as `char`s.
+    /// Returns an iterator that yields the literal escape code of a `char`.
     ///
     /// The default is chosen with a bias toward producing literals that are
     /// legal in a variety of languages, including C++11 and similar C-family
     /// languages. The exact rules are:
     ///
-    /// * Tab, CR and LF are escaped as '\t', '\r' and '\n' respectively.
-    /// * Single-quote, double-quote and backslash chars are backslash-
-    ///   escaped.
-    /// * Any other chars in the range [0x20,0x7e] are not escaped.
-    /// * Any other chars are given hex Unicode escapes; see `escape_unicode`.
+    /// * Tab is escaped as `\t`.
+    /// * Carriage return is escaped as `\r`.
+    /// * Line feed is escaped as `\n`.
+    /// * Single quote is escaped as `\'`.
+    /// * Double quote is escaped as `\"`.
+    /// * Backslash is escaped as `\\`.
+    /// * Any character in the 'printable ASCII' range `0x20` .. `0x7e`
+    ///   inclusive is not escaped.
+    /// * All other characters are given hexadecimal Unicode escapes; see
+    ///   [`escape_unicode`][escape_unicode].
+    ///
+    /// [escape_unicode]: #method.escape_unicode
     ///
     /// # Examples
+    ///
+    /// Basic usage:
     ///
     /// ```
     /// for i in '"'.escape_default() {
@@ -236,229 +311,368 @@ impl char {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn escape_default(self) -> EscapeDefault { C::escape_default(self) }
+    pub fn escape_default(self) -> EscapeDefault {
+        C::escape_default(self)
+    }
 
-    /// Returns the number of bytes this character would need if encoded in
-    /// UTF-8.
+    /// Returns the number of bytes this `char` would need if encoded in UTF-8.
+    ///
+    /// That number of bytes is always between 1 and 4, inclusive.
     ///
     /// # Examples
     ///
-    /// ```
-    /// let n = 'ß'.len_utf8();
+    /// Basic usage:
     ///
-    /// assert_eq!(n, 2);
+    /// ```
+    /// let len = 'A'.len_utf8();
+    /// assert_eq!(len, 1);
+    ///
+    /// let len = 'ß'.len_utf8();
+    /// assert_eq!(len, 2);
+    ///
+    /// let len = 'ℝ'.len_utf8();
+    /// assert_eq!(len, 3);
+    ///
+    /// let len = '💣'.len_utf8();
+    /// assert_eq!(len, 4);
+    /// ```
+    ///
+    /// The `&str` type guarantees that its contents are UTF-8, and so we can compare the length it
+    /// would take if each code point was represented as a `char` vs in the `&str` itself:
+    ///
+    /// ```
+    /// // as chars
+    /// let eastern = '東';
+    /// let capitol = '京';
+    ///
+    /// // both can be represented as three bytes
+    /// assert_eq!(3, eastern.len_utf8());
+    /// assert_eq!(3, capitol.len_utf8());
+    ///
+    /// // as a &str, these two are encoded in UTF-8
+    /// let tokyo = "東京";
+    ///
+    /// let len = eastern.len_utf8() + capitol.len_utf8();
+    ///
+    /// // we can see that they take six bytes total...
+    /// assert_eq!(6, tokyo.len());
+    ///
+    /// // ... just like the &str
+    /// assert_eq!(len, tokyo.len());
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn len_utf8(self) -> usize { C::len_utf8(self) }
+    pub fn len_utf8(self) -> usize {
+        C::len_utf8(self)
+    }
 
-    /// Returns the number of 16-bit code units this character would need if
+    /// Returns the number of 16-bit code units this `char` would need if
     /// encoded in UTF-16.
     ///
+    /// See the documentation for [`len_utf8()`] for more explanation of this
+    /// concept. This function is a mirror, but for UTF-16 instead of UTF-8.
+    ///
+    /// [`len_utf8()`]: #method.len_utf8
+    ///
     /// # Examples
+    ///
+    /// Basic usage:
     ///
     /// ```
     /// let n = 'ß'.len_utf16();
-    ///
     /// assert_eq!(n, 1);
+    ///
+    /// let len = '💣'.len_utf16();
+    /// assert_eq!(len, 2);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn len_utf16(self) -> usize { C::len_utf16(self) }
+    pub fn len_utf16(self) -> usize {
+        C::len_utf16(self)
+    }
 
-    /// Encodes this character as UTF-8 into the provided byte buffer, and then
-    /// returns the number of bytes written.
+    /// Returns an interator over the bytes of this character as UTF-8.
     ///
-    /// If the buffer is not large enough, nothing will be written into it and a
-    /// `None` will be returned. A buffer of length four is large enough to
-    /// encode any `char`.
+    /// The returned iterator also has an `as_slice()` method to view the
+    /// encoded bytes as a byte slice.
     ///
     /// # Examples
     ///
-    /// In both of these examples, 'ß' takes two bytes to encode.
-    ///
     /// ```
-    /// # #![feature(unicode)]
-    /// let mut b = [0; 2];
+    /// #![feature(unicode)]
     ///
-    /// let result = 'ß'.encode_utf8(&mut b);
+    /// let iterator = 'ß'.encode_utf8();
+    /// assert_eq!(iterator.as_slice(), [0xc3, 0x9f]);
     ///
-    /// assert_eq!(result, Some(2));
+    /// for (i, byte) in iterator.enumerate() {
+    ///     println!("byte {}: {:x}", i, byte);
+    /// }
     /// ```
-    ///
-    /// A buffer that's too small:
-    ///
-    /// ```
-    /// # #![feature(unicode)]
-    /// let mut b = [0; 1];
-    ///
-    /// let result = 'ß'.encode_utf8(&mut b);
-    ///
-    /// assert_eq!(result, None);
-    /// ```
-    #[unstable(feature = "unicode",
-               reason = "pending decision about Iterator/Writer/Reader")]
+    #[unstable(feature = "unicode", issue = "27784")]
     #[inline]
-    pub fn encode_utf8(self, dst: &mut [u8]) -> Option<usize> {
-        C::encode_utf8(self, dst)
+    pub fn encode_utf8(self) -> EncodeUtf8 {
+        C::encode_utf8(self)
     }
 
-    /// Encodes this character as UTF-16 into the provided `u16` buffer, and
-    /// then returns the number of `u16`s written.
+    /// Returns an interator over the `u16` entries of this character as UTF-16.
     ///
-    /// If the buffer is not large enough, nothing will be written into it and a
-    /// `None` will be returned. A buffer of length 2 is large enough to encode
-    /// any `char`.
+    /// The returned iterator also has an `as_slice()` method to view the
+    /// encoded form as a slice.
     ///
     /// # Examples
     ///
-    /// In both of these examples, 'ß' takes one `u16` to encode.
-    ///
     /// ```
-    /// # #![feature(unicode)]
-    /// let mut b = [0; 1];
+    /// #![feature(unicode)]
     ///
-    /// let result = 'ß'.encode_utf16(&mut b);
+    /// let iterator = '𝕊'.encode_utf16();
+    /// assert_eq!(iterator.as_slice(), [0xd835, 0xdd4a]);
     ///
-    /// assert_eq!(result, Some(1));
+    /// for (i, val) in iterator.enumerate() {
+    ///     println!("entry {}: {:x}", i, val);
+    /// }
     /// ```
-    ///
-    /// A buffer that's too small:
-    ///
-    /// ```
-    /// # #![feature(unicode)]
-    /// let mut b = [0; 0];
-    ///
-    /// let result = 'ß'.encode_utf8(&mut b);
-    ///
-    /// assert_eq!(result, None);
-    /// ```
-    #[unstable(feature = "unicode",
-               reason = "pending decision about Iterator/Writer/Reader")]
+    #[unstable(feature = "unicode", issue = "27784")]
     #[inline]
-    pub fn encode_utf16(self, dst: &mut [u16]) -> Option<usize> {
-        C::encode_utf16(self, dst)
+    pub fn encode_utf16(self) -> EncodeUtf16 {
+        C::encode_utf16(self)
     }
 
-    /// Returns whether the specified character is considered a Unicode
-    /// alphabetic code point.
+    /// Returns true if this `char` is an alphabetic code point, and false if not.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// assert!('a'.is_alphabetic());
+    /// assert!('京'.is_alphabetic());
+    ///
+    /// let c = '💝';
+    /// // love is many things, but it is not alphabetic
+    /// assert!(!c.is_alphabetic());
+    /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn is_alphabetic(self) -> bool {
         match self {
-            'a' ... 'z' | 'A' ... 'Z' => true,
+            'a'...'z' | 'A'...'Z' => true,
             c if c > '\x7f' => derived_property::Alphabetic(c),
-            _ => false
+            _ => false,
         }
     }
 
-    /// Returns whether the specified character satisfies the 'XID_Start'
-    /// Unicode property.
+    /// Returns true if this `char` satisfies the 'XID_Start' Unicode property, and false
+    /// otherwise.
     ///
     /// 'XID_Start' is a Unicode Derived Property specified in
     /// [UAX #31](http://unicode.org/reports/tr31/#NFKC_Modifications),
-    /// mostly similar to ID_Start but modified for closure under NFKx.
+    /// mostly similar to `ID_Start` but modified for closure under `NFKx`.
     #[unstable(feature = "unicode",
-               reason = "mainly needed for compiler internals")]
+               reason = "mainly needed for compiler internals",
+               issue = "0")]
     #[inline]
-    pub fn is_xid_start(self) -> bool { derived_property::XID_Start(self) }
+    pub fn is_xid_start(self) -> bool {
+        derived_property::XID_Start(self)
+    }
 
-    /// Returns whether the specified `char` satisfies the 'XID_Continue'
-    /// Unicode property.
+    /// Returns true if this `char` satisfies the 'XID_Continue' Unicode property, and false
+    /// otherwise.
     ///
     /// 'XID_Continue' is a Unicode Derived Property specified in
     /// [UAX #31](http://unicode.org/reports/tr31/#NFKC_Modifications),
     /// mostly similar to 'ID_Continue' but modified for closure under NFKx.
     #[unstable(feature = "unicode",
-               reason = "mainly needed for compiler internals")]
+               reason = "mainly needed for compiler internals",
+               issue = "0")]
     #[inline]
-    pub fn is_xid_continue(self) -> bool { derived_property::XID_Continue(self) }
+    pub fn is_xid_continue(self) -> bool {
+        derived_property::XID_Continue(self)
+    }
 
-    /// Indicates whether a character is in lowercase.
+    /// Returns true if this `char` is lowercase, and false otherwise.
     ///
-    /// This is defined according to the terms of the Unicode Derived Core
+    /// 'Lowercase' is defined according to the terms of the Unicode Derived Core
     /// Property `Lowercase`.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// assert!('a'.is_lowercase());
+    /// assert!('δ'.is_lowercase());
+    /// assert!(!'A'.is_lowercase());
+    /// assert!(!'Δ'.is_lowercase());
+    ///
+    /// // The various Chinese scripts do not have case, and so:
+    /// assert!(!'中'.is_lowercase());
+    /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn is_lowercase(self) -> bool {
         match self {
-            'a' ... 'z' => true,
+            'a'...'z' => true,
             c if c > '\x7f' => derived_property::Lowercase(c),
-            _ => false
+            _ => false,
         }
     }
 
-    /// Indicates whether a character is in uppercase.
+    /// Returns true if this `char` is uppercase, and false otherwise.
     ///
-    /// This is defined according to the terms of the Unicode Derived Core
+    /// 'Uppercase' is defined according to the terms of the Unicode Derived Core
     /// Property `Uppercase`.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// assert!(!'a'.is_uppercase());
+    /// assert!(!'δ'.is_uppercase());
+    /// assert!('A'.is_uppercase());
+    /// assert!('Δ'.is_uppercase());
+    ///
+    /// // The various Chinese scripts do not have case, and so:
+    /// assert!(!'中'.is_uppercase());
+    /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn is_uppercase(self) -> bool {
         match self {
-            'A' ... 'Z' => true,
+            'A'...'Z' => true,
             c if c > '\x7f' => derived_property::Uppercase(c),
-            _ => false
+            _ => false,
         }
     }
 
-    /// Indicates whether a character is whitespace.
+    /// Returns true if this `char` is whitespace, and false otherwise.
     ///
-    /// Whitespace is defined in terms of the Unicode Property `White_Space`.
+    /// 'Whitespace' is defined according to the terms of the Unicode Derived Core
+    /// Property `White_Space`.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// assert!(' '.is_whitespace());
+    ///
+    /// // a non-breaking space
+    /// assert!('\u{A0}'.is_whitespace());
+    ///
+    /// assert!(!'越'.is_whitespace());
+    /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn is_whitespace(self) -> bool {
         match self {
-            ' ' | '\x09' ... '\x0d' => true,
+            ' ' | '\x09'...'\x0d' => true,
             c if c > '\x7f' => property::White_Space(c),
-            _ => false
+            _ => false,
         }
     }
 
-    /// Indicates whether a character is alphanumeric.
+    /// Returns true if this `char` is alphanumeric, and false otherwise.
     ///
-    /// Alphanumericness is defined in terms of the Unicode General Categories
+    /// 'Alphanumeric'-ness is defined in terms of the Unicode General Categories
     /// 'Nd', 'Nl', 'No' and the Derived Core Property 'Alphabetic'.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// assert!('٣'.is_alphanumeric());
+    /// assert!('7'.is_alphanumeric());
+    /// assert!('৬'.is_alphanumeric());
+    /// assert!('K'.is_alphanumeric());
+    /// assert!('و'.is_alphanumeric());
+    /// assert!('藏'.is_alphanumeric());
+    /// assert!(!'¾'.is_alphanumeric());
+    /// assert!(!'①'.is_alphanumeric());
+    /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn is_alphanumeric(self) -> bool {
         self.is_alphabetic() || self.is_numeric()
     }
 
-    /// Indicates whether a character is a control code point.
+    /// Returns true if this `char` is a control code point, and false otherwise.
     ///
-    /// Control code points are defined in terms of the Unicode General
+    /// 'Control code point' is defined in terms of the Unicode General
     /// Category `Cc`.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// // U+009C, STRING TERMINATOR
+    /// assert!(''.is_control());
+    /// assert!(!'q'.is_control());
+    /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn is_control(self) -> bool { general_category::Cc(self) }
+    pub fn is_control(self) -> bool {
+        general_category::Cc(self)
+    }
 
-    /// Indicates whether the character is numeric (Nd, Nl, or No).
+    /// Returns true if this `char` is numeric, and false otherwise.
+    ///
+    /// 'Numeric'-ness is defined in terms of the Unicode General Categories
+    /// 'Nd', 'Nl', 'No'.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// assert!('٣'.is_numeric());
+    /// assert!('7'.is_numeric());
+    /// assert!('৬'.is_numeric());
+    /// assert!(!'K'.is_numeric());
+    /// assert!(!'و'.is_numeric());
+    /// assert!(!'藏'.is_numeric());
+    /// assert!(!'¾'.is_numeric());
+    /// assert!(!'①'.is_numeric());
+    /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn is_numeric(self) -> bool {
         match self {
-            '0' ... '9' => true,
+            '0'...'9' => true,
             c if c > '\x7f' => general_category::N(c),
-            _ => false
+            _ => false,
         }
     }
 
-    /// Converts a character to its lowercase equivalent.
+    /// Returns an iterator that yields the lowercase equivalent of a `char`.
     ///
-    /// This performs complex unconditional mappings with no tailoring.
-    /// See `to_uppercase()` for references and more information.
+    /// If no conversion is possible then an iterator with just the input character is returned.
     ///
-    /// # Return value
+    /// This performs complex unconditional mappings with no tailoring: it maps
+    /// one Unicode character to its lowercase equivalent according to the
+    /// [Unicode database] and the additional complex mappings
+    /// [`SpecialCasing.txt`]. Conditional mappings (based on context or
+    /// language) are not considered here.
     ///
-    /// Returns an iterator which yields the characters corresponding to the
-    /// lowercase equivalent of the character. If no conversion is possible then
-    /// an iterator with just the input character is returned.
+    /// For a full reference, see [here][reference].
+    ///
+    /// [Unicode database]: ftp://ftp.unicode.org/Public/UNIDATA/UnicodeData.txt
+    ///
+    /// [`SpecialCasing.txt`]: ftp://ftp.unicode.org/Public/UNIDATA/SpecialCasing.txt
+    ///
+    /// [reference]: http://www.unicode.org/versions/Unicode7.0.0/ch03.pdf#G33992
     ///
     /// # Examples
     ///
+    /// Basic usage:
+    ///
     /// ```
-    /// assert_eq!(Some('c'), 'C'.to_lowercase().next());
+    /// assert_eq!('C'.to_lowercase().next(), Some('c'));
+    ///
+    /// // Japanese scripts do not have case, and so:
+    /// assert_eq!('山'.to_lowercase().next(), Some('山'));
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
@@ -466,54 +680,178 @@ impl char {
         ToLowercase(CaseMappingIter::new(conversions::to_lower(self)))
     }
 
-    /// Converts a character to its uppercase equivalent.
+    /// Returns an iterator that yields the uppercase equivalent of a `char`.
     ///
-    /// This performs complex unconditional mappings with no tailoring:
-    /// it maps one Unicode character to its uppercase equivalent
-    /// according to the Unicode database [1]
-    /// and the additional complex mappings [`SpecialCasing.txt`].
-    /// Conditional mappings (based on context or language) are not considerd here.
+    /// If no conversion is possible then an iterator with just the input character is returned.
     ///
-    /// A full reference can be found here [2].
+    /// This performs complex unconditional mappings with no tailoring: it maps
+    /// one Unicode character to its uppercase equivalent according to the
+    /// [Unicode database] and the additional complex mappings
+    /// [`SpecialCasing.txt`]. Conditional mappings (based on context or
+    /// language) are not considered here.
     ///
-    /// # Return value
+    /// For a full reference, see [here][reference].
     ///
-    /// Returns an iterator which yields the characters corresponding to the
-    /// uppercase equivalent of the character. If no conversion is possible then
-    /// an iterator with just the input character is returned.
-    ///
-    /// [1]: ftp://ftp.unicode.org/Public/UNIDATA/UnicodeData.txt
+    /// [Unicode database]: ftp://ftp.unicode.org/Public/UNIDATA/UnicodeData.txt
     ///
     /// [`SpecialCasing.txt`]: ftp://ftp.unicode.org/Public/UNIDATA/SpecialCasing.txt
     ///
-    /// [2]: http://www.unicode.org/versions/Unicode7.0.0/ch03.pdf#G33992
+    /// [reference]: http://www.unicode.org/versions/Unicode7.0.0/ch03.pdf#G33992
     ///
     /// # Examples
     ///
+    /// Basic usage:
+    ///
     /// ```
-    /// assert_eq!(Some('C'), 'c'.to_uppercase().next());
+    /// assert_eq!('c'.to_uppercase().next(), Some('C'));
+    ///
+    /// // Japanese does not have case, and so:
+    /// assert_eq!('山'.to_uppercase().next(), Some('山'));
     /// ```
+    ///
+    /// In Turkish, the equivalent of 'i' in Latin has five forms instead of two:
+    ///
+    /// * 'Dotless': I / ı, sometimes written ï
+    /// * 'Dotted': İ / i
+    ///
+    /// Note that the lowercase dotted 'i' is the same as the Latin. Therefore:
+    ///
+    /// ```
+    /// let upper_i = 'i'.to_uppercase().next();
+    /// ```
+    ///
+    /// The value of `upper_i` here relies on the language of the text: if we're
+    /// in `en-US`, it should be `Some('I')`, but if we're in `tr_TR`, it should
+    /// be `Some('İ')`. `to_uppercase()` does not take this into account, and so:
+    ///
+    /// ```
+    /// let upper_i = 'i'.to_uppercase().next();
+    ///
+    /// assert_eq!(Some('I'), upper_i);
+    /// ```
+    ///
+    /// holds across languages.
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn to_uppercase(self) -> ToUppercase {
         ToUppercase(CaseMappingIter::new(conversions::to_upper(self)))
     }
+}
 
-    /// Returns this character's displayed width in columns, or `None` if it is a
-    /// control character other than `'\x00'`.
-    ///
-    /// `is_cjk` determines behavior for characters in the Ambiguous category:
-    /// if `is_cjk` is `true`, these are 2 columns wide; otherwise, they are 1.
-    /// In CJK contexts, `is_cjk` should be `true`, else it should be `false`.
-    /// [Unicode Standard Annex #11](http://www.unicode.org/reports/tr11/)
-    /// recommends that these characters be treated as 1 column (i.e.,
-    /// `is_cjk` = `false`) if the context cannot be reliably determined.
-    #[deprecated(reason = "use the crates.io `unicode-width` library instead",
-                 since = "1.0.0")]
-    #[unstable(feature = "unicode",
-               reason = "needs expert opinion. is_cjk flag stands out as ugly")]
-    #[inline]
-    pub fn width(self, is_cjk: bool) -> Option<usize> {
-        charwidth::width(self, is_cjk)
+/// An iterator that decodes UTF-16 encoded code points from an iterator of `u16`s.
+#[unstable(feature = "decode_utf16", reason = "recently exposed", issue = "27830")]
+#[derive(Clone)]
+pub struct DecodeUtf16<I>
+    where I: Iterator<Item = u16>
+{
+    iter: I,
+    buf: Option<u16>,
+}
+
+/// Create an iterator over the UTF-16 encoded code points in `iter`,
+/// returning unpaired surrogates as `Err`s.
+///
+/// # Examples
+///
+/// Basic usage:
+///
+/// ```
+/// #![feature(decode_utf16)]
+///
+/// use std::char::decode_utf16;
+///
+/// fn main() {
+///     // 𝄞mus<invalid>ic<invalid>
+///     let v = [0xD834, 0xDD1E, 0x006d, 0x0075,
+///              0x0073, 0xDD1E, 0x0069, 0x0063,
+///              0xD834];
+///
+///     assert_eq!(decode_utf16(v.iter().cloned()).collect::<Vec<_>>(),
+///                vec![Ok('𝄞'),
+///                     Ok('m'), Ok('u'), Ok('s'),
+///                     Err(0xDD1E),
+///                     Ok('i'), Ok('c'),
+///                     Err(0xD834)]);
+/// }
+/// ```
+///
+/// A lossy decoder can be obtained by replacing `Err` results with the replacement character:
+///
+/// ```
+/// #![feature(decode_utf16)]
+///
+/// use std::char::{decode_utf16, REPLACEMENT_CHARACTER};
+///
+/// fn main() {
+///     // 𝄞mus<invalid>ic<invalid>
+///     let v = [0xD834, 0xDD1E, 0x006d, 0x0075,
+///              0x0073, 0xDD1E, 0x0069, 0x0063,
+///              0xD834];
+///
+///     assert_eq!(decode_utf16(v.iter().cloned())
+///                    .map(|r| r.unwrap_or(REPLACEMENT_CHARACTER))
+///                    .collect::<String>(),
+///                "𝄞mus�ic�");
+/// }
+/// ```
+#[unstable(feature = "decode_utf16", reason = "recently exposed", issue = "27830")]
+#[inline]
+pub fn decode_utf16<I: IntoIterator<Item = u16>>(iter: I) -> DecodeUtf16<I::IntoIter> {
+    DecodeUtf16 {
+        iter: iter.into_iter(),
+        buf: None,
     }
 }
+
+#[unstable(feature = "decode_utf16", reason = "recently exposed", issue = "27830")]
+impl<I: Iterator<Item=u16>> Iterator for DecodeUtf16<I> {
+    type Item = Result<char, u16>;
+
+    fn next(&mut self) -> Option<Result<char, u16>> {
+        let u = match self.buf.take() {
+            Some(buf) => buf,
+            None => match self.iter.next() {
+                Some(u) => u,
+                None => return None,
+            },
+        };
+
+        if u < 0xD800 || 0xDFFF < u {
+            // not a surrogate
+            Some(Ok(unsafe { from_u32_unchecked(u as u32) }))
+        } else if u >= 0xDC00 {
+            // a trailing surrogate
+            Some(Err(u))
+        } else {
+            let u2 = match self.iter.next() {
+                Some(u2) => u2,
+                // eof
+                None => return Some(Err(u)),
+            };
+            if u2 < 0xDC00 || u2 > 0xDFFF {
+                // not a trailing surrogate so we're not a valid
+                // surrogate pair, so rewind to redecode u2 next time.
+                self.buf = Some(u2);
+                return Some(Err(u));
+            }
+
+            // all ok, so lets decode it.
+            let c = (((u - 0xD800) as u32) << 10 | (u2 - 0xDC00) as u32) + 0x1_0000;
+            Some(Ok(unsafe { from_u32_unchecked(c) }))
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let (low, high) = self.iter.size_hint();
+        // we could be entirely valid surrogates (2 elements per
+        // char), or entirely non-surrogates (1 element per char)
+        (low / 2, high)
+    }
+}
+
+/// `U+FFFD REPLACEMENT CHARACTER` (�) is used in Unicode to represent a decoding error.
+/// It can occur, for example, when giving ill-formed UTF-8 bytes to
+/// [`String::from_utf8_lossy`](../../std/string/struct.String.html#method.from_utf8_lossy).
+#[unstable(feature = "decode_utf16", reason = "recently added", issue = "27830")]
+pub const REPLACEMENT_CHARACTER: char = '\u{FFFD}';

@@ -10,7 +10,6 @@
 
 use std::prelude::v1::*;
 use std::{str, mem, i16, f32, f64, fmt};
-use std::slice::bytes;
 use std::__rand as rand;
 use rand::{Rand, XorShiftRng};
 use rand::distributions::{IndependentSample, Range};
@@ -23,7 +22,6 @@ use core::num::flt2dec::{to_shortest_str, to_shortest_exp_str,
 pub use test::Bencher;
 
 mod estimator;
-mod bignum;
 mod strategy {
     mod dragon;
     mod grisu;
@@ -102,7 +100,7 @@ fn check_exact<F, T>(mut f: F, v: T, vstr: &str, expected: &[u8], expectedk: i16
 
     // check significant digits
     for i in 1..cut.unwrap_or(expected.len() - 1) {
-        bytes::copy_memory(&expected[..i], &mut expected_);
+        expected_[..i].copy_from_slice(&expected[..i]);
         let mut expectedk_ = expectedk;
         if expected[i] >= b'5' {
             // check if this is a rounding-to-even case.
@@ -149,7 +147,7 @@ fn check_exact<F, T>(mut f: F, v: T, vstr: &str, expected: &[u8], expectedk: i16
     // check infinite zero digits
     if let Some(cut) = cut {
         for i in cut..expected.len()-1 {
-            bytes::copy_memory(&expected[..cut], &mut expected_);
+            expected_[..cut].copy_from_slice(&expected[..cut]);
             for c in &mut expected_[cut..i] { *c = b'0'; }
 
             try_exact!(f(&decoded) => &mut buf, &expected_[..i], expectedk;
@@ -164,12 +162,26 @@ fn check_exact<F, T>(mut f: F, v: T, vstr: &str, expected: &[u8], expectedk: i16
     }
 }
 
+trait TestableFloat : DecodableFloat + fmt::Display {
+    /// Returns `x * 2^exp`. Almost same to `std::{f32,f64}::ldexp`.
+    /// This is used for testing.
+    fn ldexpi(f: i64, exp: isize) -> Self;
+}
+
+impl TestableFloat for f32 {
+    fn ldexpi(f: i64, exp: isize) -> Self { f as Self * (exp as Self).exp2() }
+}
+
+impl TestableFloat for f64 {
+    fn ldexpi(f: i64, exp: isize) -> Self { f as Self * (exp as Self).exp2() }
+}
+
 fn check_exact_one<F, T>(mut f: F, x: i64, e: isize, tstr: &str, expected: &[u8], expectedk: i16)
-        where T: DecodableFloat + fmt::Display,
+        where T: TestableFloat,
               F: FnMut(&Decoded, &mut [u8], i16) -> (usize, i16) {
     // use a large enough buffer
     let mut buf = [b'_'; 1024];
-    let v: T = DecodableFloat::ldexpi(x, e);
+    let v: T = TestableFloat::ldexpi(x, e);
     let decoded = decode_finite(v);
 
     try_exact!(f(&decoded) => &mut buf, &expected, expectedk;

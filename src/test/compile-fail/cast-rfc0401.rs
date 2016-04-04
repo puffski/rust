@@ -10,12 +10,16 @@
 
 fn illegal_cast<U:?Sized,V:?Sized>(u: *const U) -> *const V
 {
-    u as *const V //~ ERROR vtable kinds
+    u as *const V
+    //~^ ERROR casting
+    //~^^ NOTE vtable kinds
 }
 
 fn illegal_cast_2<U:?Sized>(u: *const U) -> *const str
 {
-    u as *const str //~ ERROR vtable kinds
+    u as *const str
+    //~^ ERROR casting
+    //~^^ NOTE vtable kinds
 }
 
 trait Foo { fn foo(&self) {} }
@@ -33,6 +37,7 @@ fn main()
     let f: f32 = 1.2;
     let v = 0 as *const u8;
     let fat_v : *const [u8] = unsafe { &*(0 as *const [u8; 1])};
+    let fat_sv : *const [i8] = unsafe { &*(0 as *const [i8; 1])};
     let foo: &Foo = &f;
 
     let _ = v as &u8; //~ ERROR non-scalar
@@ -41,41 +46,79 @@ fn main()
     let _ = v as (u32,); //~ ERROR non-scalar
     let _ = Some(&v) as *const u8; //~ ERROR non-scalar
 
-    let _ = v as f32; //~ ERROR through a usize first
-    let _ = main as f64; //~ ERROR through a usize first
-    let _ = &v as usize; //~ ERROR through a raw pointer first
-    let _ = f as *const u8; //~ ERROR through a usize first
-    let _ = 3 as bool; //~ ERROR compare with zero
-    let _ = E::A as bool; //~ ERROR compare with zero
+    let _ = v as f32;
+    //~^ ERROR casting
+    //~^^ HELP through a usize first
+    let _ = main as f64;
+    //~^ ERROR casting
+    //~^^ HELP through a usize first
+    let _ = &v as usize;
+    //~^ ERROR casting
+    //~^^ HELP through a raw pointer first
+    let _ = f as *const u8;
+    //~^ ERROR casting
+    //~^^ HELP through a usize first
+    let _ = 3 as bool;
+    //~^ ERROR cannot cast as `bool`
+    //~^^ HELP compare with zero
+    //~^^^ HELP run `rustc --explain E0054` to see a detailed explanation
+    let _ = E::A as bool;
+    //~^ ERROR cannot cast as `bool`
+    //~^^ HELP compare with zero
+    //~^^^ HELP run `rustc --explain E0054` to see a detailed explanation
     let _ = 0x61u32 as char; //~ ERROR only `u8` can be cast
 
-    let _ = false as f32; //~ ERROR through an integer first
-    let _ = E::A as f32; //~ ERROR through an integer first
-    let _ = 'a' as f32; //~ ERROR through an integer first
+    let _ = false as f32;
+    //~^ ERROR casting
+    //~^^ HELP through an integer first
+    let _ = E::A as f32;
+    //~^ ERROR casting
+    //~^^ HELP through an integer first
+    let _ = 'a' as f32;
+    //~^ ERROR casting
+    //~^^ HELP through an integer first
 
-    let _ = false as *const u8; //~ ERROR through a usize first
-    let _ = E::A as *const u8; //~ ERROR through a usize first
-    let _ = 'a' as *const u8; //~ ERROR through a usize first
+    let _ = false as *const u8;
+    //~^ ERROR casting
+    //~^^ HELP through a usize first
+    let _ = E::A as *const u8;
+    //~^ ERROR casting
+    //~^^ HELP through a usize first
+    let _ = 'a' as *const u8;
+    //~^ ERROR casting
+    //~^^ HELP through a usize first
 
-    let _ = 42usize as *const [u8]; //~ ERROR illegal cast
-    let _ = v as *const [u8]; //~ ERROR illegal cast
+    let _ = 42usize as *const [u8]; //~ ERROR casting
+    let _ = v as *const [u8]; //~ ERROR cannot cast
     let _ = fat_v as *const Foo;
-    //~^ ERROR `core::marker::Sized` is not implemented for the type `[u8]`
-    let _ = foo as *const str; //~ ERROR illegal cast
-    let _ = foo as *mut str; //~ ERROR illegal cast
-    let _ = main as *mut str; //~ ERROR illegal cast
-    let _ = &f as *mut f32; //~ ERROR illegal cast
-    let _ = &f as *const f64; //~ ERROR illegal cast
-    let _ = fat_v as usize; //~ ERROR through a raw pointer first
+    //~^ ERROR `std::marker::Sized` is not implemented for the type `[u8]`
+    //~^^ HELP run `rustc --explain E0277` to see a detailed explanation
+    //~^^^ NOTE `[u8]` does not have a constant size known at compile-time
+    //~^^^^ NOTE required for the cast to the object type `Foo`
+    let _ = foo as *const str; //~ ERROR casting
+    let _ = foo as *mut str; //~ ERROR casting
+    let _ = main as *mut str; //~ ERROR casting
+    let _ = &f as *mut f32; //~ ERROR casting
+    let _ = &f as *const f64; //~ ERROR casting
+    let _ = fat_sv as usize;
+    //~^ ERROR casting
+    //~^^ HELP through a thin pointer first
 
     let a : *const str = "hello";
     let _ = a as *const Foo;
-    //~^ ERROR `core::marker::Sized` is not implemented for the type `str`
+    //~^ ERROR `std::marker::Sized` is not implemented for the type `str`
+    //~^^ HELP run `rustc --explain E0277` to see a detailed explanation
+    //~^^^ NOTE `str` does not have a constant size known at compile-time
+    //~^^^^ NOTE required for the cast to the object type `Foo`
 
     // check no error cascade
     let _ = main.f as *const u32; //~ ERROR attempted access of field
 
     let cf: *const Foo = &0;
-    let _ = cf as *const [u8]; //~ ERROR vtable kinds
-    let _ = cf as *const Bar; //~ ERROR vtable kinds
+    let _ = cf as *const [u16];
+    //~^ ERROR casting
+    //~^^ NOTE vtable kinds
+    let _ = cf as *const Bar;
+    //~^ ERROR casting
+    //~^^ NOTE vtable kinds
 }

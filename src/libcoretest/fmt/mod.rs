@@ -8,8 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-mod num;
 mod builders;
+mod float;
+mod num;
 
 #[test]
 fn test_format_flags() {
@@ -18,4 +19,12 @@ fn test_format_flags() {
     assert_eq!(format!("{:p} {:x}", p, 16), format!("{:p} 10", p));
 
     assert_eq!(format!("{: >3}", 'a'), "  a");
+}
+
+#[test]
+fn test_pointer_formats_data_pointer() {
+    let b: &[u8] = b"";
+    let s: &str = "";
+    assert_eq!(format!("{:p}", s), format!("{:p}", s.as_ptr()));
+    assert_eq!(format!("{:p}", b), format!("{:p}", b.as_ptr()));
 }

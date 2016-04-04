@@ -17,6 +17,7 @@
 *.elc
 *.epub
 *.exe
+*.pdb
 *.fn
 *.html
 *.kdev4
@@ -93,3 +94,4 @@ tmp.*.rs
 version.md
 version.ml
 version.texi
+/target

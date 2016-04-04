@@ -10,17 +10,15 @@
 
 //! The implementations of `Rand` for the built-in types.
 
-use core::prelude::*;
 use core::char;
-use core::isize;
-use core::usize;
+use core::mem;
 
-use {Rand,Rng};
+use {Rand, Rng};
 
 impl Rand for isize {
     #[inline]
     fn rand<R: Rng>(rng: &mut R) -> isize {
-        if isize::BITS == 32 {
+        if mem::size_of::<isize>() == 4 {
             rng.gen::<i32>() as isize
         } else {
             rng.gen::<i64>() as isize
@@ -59,7 +57,7 @@ impl Rand for i64 {
 impl Rand for usize {
     #[inline]
     fn rand<R: Rng>(rng: &mut R) -> usize {
-        if usize::BITS == 32 {
+        if mem::size_of::<usize>() == 4 {
             rng.gen::<u32>() as usize
         } else {
             rng.gen::<u64>() as usize
@@ -186,7 +184,9 @@ macro_rules! tuple_impl {
 
 impl Rand for () {
     #[inline]
-    fn rand<R: Rng>(_: &mut R) -> () { () }
+    fn rand<R: Rng>(_: &mut R) -> () {
+        ()
+    }
 }
 tuple_impl!{A}
 tuple_impl!{A, B}
@@ -201,7 +201,7 @@ tuple_impl!{A, B, C, D, E, F, G, H, I, J}
 tuple_impl!{A, B, C, D, E, F, G, H, I, J, K}
 tuple_impl!{A, B, C, D, E, F, G, H, I, J, K, L}
 
-impl<T:Rand> Rand for Option<T> {
+impl<T: Rand> Rand for Option<T> {
     #[inline]
     fn rand<R: Rng>(rng: &mut R) -> Option<T> {
         if rng.gen() {

@@ -35,8 +35,7 @@
 # that's per-target so you're allowed to conditionally add files based on the
 # target.
 ################################################################################
-NATIVE_LIBS := rust_builtin hoedown morestack miniz \
-		rustrt_native rust_test_helpers
+NATIVE_LIBS := hoedown miniz rust_test_helpers
 
 # $(1) is the target triple
 define NATIVE_LIBRARIES
@@ -51,12 +50,7 @@ NATIVE_DEPS_hoedown_$(1) := hoedown/src/autolink.c \
 			hoedown/src/stack.c \
 			hoedown/src/version.c
 NATIVE_DEPS_miniz_$(1) = miniz.c
-NATIVE_DEPS_rust_builtin_$(1) := rust_builtin.c \
-			rust_android_dummy.c
-NATIVE_DEPS_rustrt_native_$(1) := arch/$$(HOST_$(1))/record_sp.S
 NATIVE_DEPS_rust_test_helpers_$(1) := rust_test_helpers.c
-NATIVE_DEPS_morestack_$(1) := arch/$$(HOST_$(1))/morestack.S
-
 
 ################################################################################
 # You shouldn't find it that necessary to edit anything below this line.
@@ -132,16 +126,37 @@ define DEF_THIRD_PARTY_TARGETS
 
 # $(1) is the target triple
 
-ifeq ($$(CFG_WINDOWSY_$(1)), 1)
-  # This isn't necessarily a desired option, but it's harmless and works around
-  # what appears to be a mingw-w64 bug.
+ifeq ($$(CFG_WINDOWSY_$(1)),1)
+  # A bit of history here, this used to be --enable-lazy-lock added in #14006
+  # which was filed with jemalloc in jemalloc/jemalloc#83 which was also
+  # reported to MinGW: http://sourceforge.net/p/mingw-w64/bugs/395/
   #
-  # https://sourceforge.net/p/mingw-w64/bugs/395/
-  JEMALLOC_ARGS_$(1) := --enable-lazy-lock
+  # When updating jemalloc to 4.0, however, it was found that binaries would
+  # exit with the status code STATUS_RESOURCE_NOT_OWNED indicating that a thread
+  # was unlocking a mutex it never locked. Disabling this "lazy lock" option
+  # seems to fix the issue, but it was enabled by default for MinGW targets in
+  # 13473c7 for jemalloc.
+  #
+  # As a result of all that, force disabling lazy lock on Windows, and after
+  # reading some code it at least *appears* that the initialization of mutexes
+  # is otherwise ok in jemalloc, so shouldn't cause problems hopefully...
+  #
+  # tl;dr: make windows behave like other platforms by disabling lazy locking,
+  #        but requires passing an option due to a historical default with
+  #        jemalloc.
+  JEMALLOC_ARGS_$(1) := --disable-lazy-lock
 else ifeq ($(OSTYPE_$(1)), apple-ios)
   JEMALLOC_ARGS_$(1) := --disable-tls
 else ifeq ($(findstring android, $(OSTYPE_$(1))), android)
-  JEMALLOC_ARGS_$(1) := --disable-tls
+  # We force android to have prefixed symbols because apparently replacement of
+  # the libc allocator doesn't quite work. When this was tested (unprefixed
+  # symbols), it was found that the `realpath` function in libc would allocate
+  # with libc malloc (not jemalloc malloc), and then the standard library would
+  # free with jemalloc free, causing a segfault.
+  #
+  # If the test suite passes, however, without symbol prefixes then we should be
+  # good to go!
+  JEMALLOC_ARGS_$(1) := --disable-tls --with-jemalloc-prefix=je_
 endif
 
 ifdef CFG_ENABLE_DEBUG_JEMALLOC
@@ -179,7 +194,7 @@ JEMALLOC_LOCAL_$(1) := $$(JEMALLOC_BUILD_DIR_$(1))/lib/$$(JEMALLOC_REAL_NAME_$(1
 $$(JEMALLOC_LOCAL_$(1)): $$(JEMALLOC_DEPS) $$(MKFILE_DEPS)
 	@$$(call E, make: jemalloc)
 	cd "$$(JEMALLOC_BUILD_DIR_$(1))"; "$(S)src/jemalloc/configure" \
-		$$(JEMALLOC_ARGS_$(1)) --with-jemalloc-prefix=je_ $(CFG_JEMALLOC_FLAGS) \
+		$$(JEMALLOC_ARGS_$(1)) $(CFG_JEMALLOC_FLAGS) \
 		--build=$$(CFG_GNU_TRIPLE_$(CFG_BUILD)) --host=$$(CFG_GNU_TRIPLE_$(1)) \
 		CC="$$(CC_$(1)) $$(CFG_JEMALLOC_CFLAGS_$(1))" \
 		AR="$$(AR_$(1))" \
@@ -188,8 +203,6 @@ $$(JEMALLOC_LOCAL_$(1)): $$(JEMALLOC_DEPS) $$(MKFILE_DEPS)
 		EXTRA_CFLAGS="-g1 -ffunction-sections -fdata-sections"
 	$$(Q)$$(MAKE) -C "$$(JEMALLOC_BUILD_DIR_$(1))" build_lib_static
 
-ifeq ($$(CFG_DISABLE_JEMALLOC),)
-RUSTFLAGS_alloc := --cfg jemalloc
 ifeq ($(1),$$(CFG_BUILD))
 ifneq ($$(CFG_JEMALLOC_ROOT),)
 $$(JEMALLOC_LIB_$(1)): $$(CFG_JEMALLOC_ROOT)/libjemalloc_pic.a
@@ -202,10 +215,6 @@ endif
 else
 $$(JEMALLOC_LIB_$(1)): $$(JEMALLOC_LOCAL_$(1))
 	$$(Q)cp $$< $$@
-endif
-else
-$$(JEMALLOC_LIB_$(1)): $$(MKFILE_DEPS)
-	$$(Q)touch $$@
 endif
 
 ################################################################################
@@ -226,23 +235,41 @@ COMPRT_NAME_$(1) := $$(call CFG_STATIC_LIB_NAME_$(1),compiler-rt)
 COMPRT_LIB_$(1) := $$(RT_OUTPUT_DIR_$(1))/$$(COMPRT_NAME_$(1))
 COMPRT_BUILD_DIR_$(1) := $$(RT_OUTPUT_DIR_$(1))/compiler-rt
 
-# Note that on MSVC-targeting builds we hardwire CC/AR to gcc/ar even though
-# we're targeting MSVC. This is because although compiler-rt has a CMake build
-# config I can't actually figure out how to use it, so I'm not sure how to use
-# cl.exe to build the objects. Additionally, the compiler-rt library when built
-# with gcc has the same ABI as cl.exe, so they're largely compatible
+ifeq ($$(findstring msvc,$(1)),msvc)
+$$(COMPRT_LIB_$(1)): $$(COMPRT_DEPS) $$(MKFILE_DEPS) $$(LLVM_CONFIG_$$(CFG_BUILD))
+	@$$(call E, cmake: compiler-rt)
+	$$(Q)cd "$$(COMPRT_BUILD_DIR_$(1))"; $$(CFG_CMAKE) "$(S)src/compiler-rt" \
+		-DCMAKE_BUILD_TYPE=$$(LLVM_BUILD_CONFIG_MODE) \
+		-DLLVM_CONFIG_PATH=$$(LLVM_CONFIG_$$(CFG_BUILD)) \
+		-G"$$(CFG_CMAKE_GENERATOR)"
+	$$(Q)$$(CFG_CMAKE) --build "$$(COMPRT_BUILD_DIR_$(1))" \
+		--target lib/builtins/builtins \
+		--config $$(LLVM_BUILD_CONFIG_MODE) \
+		-- //v:m //nologo
+	$$(Q)cp $$(COMPRT_BUILD_DIR_$(1))/lib/windows/$$(LLVM_BUILD_CONFIG_MODE)/clang_rt.builtins-$$(HOST_$(1)).lib $$@
+else
 COMPRT_CC_$(1) := $$(CC_$(1))
 COMPRT_AR_$(1) := $$(AR_$(1))
-COMPRT_CFLAGS_$(1) := $$(CFG_GCCISH_CFLAGS_$(1))
-ifeq ($$(findstring msvc,$(1)),msvc)
-COMPRT_CC_$(1) := gcc
-COMPRT_AR_$(1) := ar
-ifeq ($$(findstring i686,$(1)),i686)
-COMPRT_CFLAGS_$(1) := $$(CFG_GCCISH_CFLAGS_$(1)) -m32
+# We chomp -Werror here because GCC warns about the type signature of
+# builtins not matching its own and the build fails. It's a bit hacky,
+# but what can we do, we're building libclang-rt using GCC ......
+COMPRT_CFLAGS_$(1) := $$(CFG_GCCISH_CFLAGS_$(1)) -Wno-error -std=c99
+
+# FreeBSD Clang's packaging is problematic; it doesn't copy unwind.h to
+# the standard include directory. This should really be in our changes to
+# compiler-rt, but we override the CFLAGS here so there isn't much choice
+ifeq ($$(findstring freebsd,$(1)),freebsd)
+	COMPRT_CFLAGS_$(1) += -I/usr/include/c++/v1
+endif
+
+ifeq ($$(findstring emscripten,$(1)),emscripten)
+
+# FIXME: emscripten doesn't use compiler-rt and can't build it without
+# further hacks
+$$(COMPRT_LIB_$(1)):
+	touch $$@
+
 else
-COMPRT_CFLAGS_$(1) := $$(CFG_GCCISH_CFLAGS_$(1)) -m64
-endif
-endif
 
 $$(COMPRT_LIB_$(1)): $$(COMPRT_DEPS) $$(MKFILE_DEPS)
 	@$$(call E, make: compiler-rt)
@@ -257,6 +284,9 @@ $$(COMPRT_LIB_$(1)): $$(COMPRT_DEPS) $$(MKFILE_DEPS)
 		triple-builtins
 	$$(Q)cp $$(COMPRT_BUILD_DIR_$(1))/triple/builtins/libcompiler_rt.a $$@
 
+endif # if emscripten
+endif
+
 ################################################################################
 # libbacktrace
 #
@@ -269,8 +299,10 @@ BACKTRACE_NAME_$(1) := $$(call CFG_STATIC_LIB_NAME_$(1),backtrace)
 BACKTRACE_LIB_$(1) := $$(RT_OUTPUT_DIR_$(1))/$$(BACKTRACE_NAME_$(1))
 BACKTRACE_BUILD_DIR_$(1) := $$(RT_OUTPUT_DIR_$(1))/libbacktrace
 
-# We don't use this on platforms that aren't linux-based, so just make the file
-# available, the compilation of libstd won't actually build it.
+# We don't use this on platforms that aren't linux-based (with the exception of
+# msys2/mingw builds on windows, which use it to read the dwarf debug
+# information) so just make the file available, the compilation of libstd won't
+# actually build it.
 ifeq ($$(findstring darwin,$$(OSTYPE_$(1))),darwin)
 # See comment above
 $$(BACKTRACE_LIB_$(1)):
@@ -283,8 +315,14 @@ $$(BACKTRACE_LIB_$(1)):
 	touch $$@
 else
 
-ifeq ($$(CFG_WINDOWSY_$(1)),1)
+ifeq ($$(findstring msvc,$(1)),msvc)
 # See comment above
+$$(BACKTRACE_LIB_$(1)):
+	touch $$@
+else
+
+ifeq ($$(findstring emscripten,$(1)),emscripten)
+# FIXME: libbacktrace doesn't understand the emscripten triple
 $$(BACKTRACE_LIB_$(1)):
 	touch $$@
 else
@@ -306,16 +344,25 @@ endif
 # ./configure script. This is done to force libbacktrace to *not* use the
 # atomic/sync functionality because it pulls in unnecessary dependencies and we
 # never use it anyway.
+#
+# We also use `env PWD=` to clear the PWD environment variable, and then
+# execute the command in a new shell. This is necessary to workaround a
+# buildbot/msys2 bug: the shell is launched with PWD set to a windows-style path,
+# which results in all further uses of `pwd` also printing a windows-style path,
+# which breaks libbacktrace's configure script. Clearing PWD within the same
+# shell is not sufficient.
+
 $$(BACKTRACE_BUILD_DIR_$(1))/Makefile: $$(BACKTRACE_DEPS) $$(MKFILE_DEPS)
 	@$$(call E, configure: libbacktrace for $(1))
 	$$(Q)rm -rf $$(BACKTRACE_BUILD_DIR_$(1))
 	$$(Q)mkdir -p $$(BACKTRACE_BUILD_DIR_$(1))
-	$$(Q)(cd $$(BACKTRACE_BUILD_DIR_$(1)) && \
+	$$(Q)(cd $$(BACKTRACE_BUILD_DIR_$(1)) && env \
+	      PWD= \
 	      CC="$$(CC_$(1))" \
 	      AR="$$(AR_$(1))" \
 	      RANLIB="$$(AR_$(1)) s" \
-	      CFLAGS="$$(CFG_GCCISH_CFLAGS_$(1):-Werror=) -fno-stack-protector" \
-	      $(S)src/libbacktrace/configure --target=$(1) --host=$(CFG_BUILD))
+	      CFLAGS="$$(CFG_GCCISH_CFLAGS_$(1)) -Wno-error -fno-stack-protector" \
+	      $(S)src/libbacktrace/configure --build=$(CFG_GNU_TRIPLE_$(CFG_BUILD)) --host=$(CFG_GNU_TRIPLE_$(1)))
 	$$(Q)echo '#undef HAVE_ATOMIC_FUNCTIONS' >> \
 	      $$(BACKTRACE_BUILD_DIR_$(1))/config.h
 	$$(Q)echo '#undef HAVE_SYNC_FUNCTIONS' >> \
@@ -327,7 +374,8 @@ $$(BACKTRACE_LIB_$(1)): $$(BACKTRACE_BUILD_DIR_$(1))/Makefile $$(MKFILE_DEPS)
 		INCDIR=$(S)src/libbacktrace
 	$$(Q)cp $$(BACKTRACE_BUILD_DIR_$(1))/.libs/libbacktrace.a $$@
 
-endif # endif for windowsy
+endif # endif for emscripten
+endif # endif for msvc
 endif # endif for ios
 endif # endif for darwin
 
@@ -342,6 +390,10 @@ endif # endif for darwin
 ifeq ($$(findstring musl,$(1)),musl)
 $$(RT_OUTPUT_DIR_$(1))/%: $$(CFG_MUSL_ROOT)/lib/%
 	cp $$^ $$@
+else
+# Ask gcc where it is
+$$(RT_OUTPUT_DIR_$(1))/%:
+	cp $$(shell $$(CC_$(1)) -print-file-name=$$(@F)) $$@
 endif
 
 endef

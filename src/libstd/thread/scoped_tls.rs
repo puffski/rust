@@ -24,7 +24,8 @@
 //! # Examples
 //!
 //! ```
-//! # #![feature(scoped_tls)]
+//! #![feature(scoped_tls)]
+//!
 //! scoped_thread_local!(static FOO: u32);
 //!
 //! // Initially each scoped slot is empty.
@@ -39,9 +40,8 @@
 //! });
 //! ```
 
-#![unstable(feature = "thread_local_internals")]
-
-use prelude::v1::*;
+#![unstable(feature = "thread_local_internals", issue = "0")]
+#![allow(deprecated)]
 
 #[doc(hidden)]
 pub use self::imp::KeyInner as __KeyInner;
@@ -55,8 +55,11 @@ pub use self::imp::KeyInner as __KeyInner;
 /// their contents.
 #[unstable(feature = "scoped_tls",
            reason = "scoped TLS has yet to have wide enough use to fully consider \
-                     stabilizing its interface")]
-pub struct ScopedKey<T> { inner: fn() -> &'static imp::KeyInner<T> }
+                     stabilizing its interface",
+           issue = "27715")]
+#[rustc_deprecated(since = "1.8.0",
+                   reason = "hasn't proven itself over LocalKey")]
+pub struct ScopedKey<T:'static> { inner: fn() -> &'static imp::KeyInner<T> }
 
 /// Declare a new scoped thread local storage key.
 ///
@@ -65,59 +68,48 @@ pub struct ScopedKey<T> { inner: fn() -> &'static imp::KeyInner<T> }
 ///
 /// See [ScopedKey documentation](thread/struct.ScopedKey.html) for more
 /// information.
+#[unstable(feature = "thread_local_internals",
+           reason = "should not be necessary",
+           issue = "0")]
+#[rustc_deprecated(since = "1.8.0",
+                   reason = "hasn't proven itself over LocalKey")]
 #[macro_export]
 #[allow_internal_unstable]
 macro_rules! scoped_thread_local {
     (static $name:ident: $t:ty) => (
-        static $name: ::std::thread::ScopedKey<$t> =
+        static $name: $crate::thread::ScopedKey<$t> =
             __scoped_thread_local_inner!($t);
     );
     (pub static $name:ident: $t:ty) => (
-        pub static $name: ::std::thread::ScopedKey<$t> =
+        pub static $name: $crate::thread::ScopedKey<$t> =
             __scoped_thread_local_inner!($t);
     );
 }
 
 #[doc(hidden)]
 #[unstable(feature = "thread_local_internals",
-           reason = "should not be necessary")]
+           reason = "should not be necessary",
+           issue = "0")]
+#[rustc_deprecated(since = "1.8.0",
+                   reason = "hasn't proven itself over LocalKey")]
 #[macro_export]
 #[allow_internal_unstable]
-#[cfg(no_elf_tls)]
 macro_rules! __scoped_thread_local_inner {
     ($t:ty) => {{
-        static _KEY: ::std::thread::__ScopedKeyInner<$t> =
-            ::std::thread::__ScopedKeyInner::new();
-        fn _getit() -> &'static ::std::thread::__ScopedKeyInner<$t> { &_KEY }
-        ::std::thread::ScopedKey::new(_getit)
-    }}
-}
-
-#[doc(hidden)]
-#[unstable(feature = "thread_local_internals",
-           reason = "should not be necessary")]
-#[macro_export]
-#[allow_internal_unstable]
-#[cfg(not(no_elf_tls))]
-macro_rules! __scoped_thread_local_inner {
-    ($t:ty) => {{
-        #[cfg_attr(not(any(windows,
-                           target_os = "android",
-                           target_os = "ios",
-                           target_os = "netbsd",
-                           target_os = "openbsd",
-                           target_arch = "aarch64")),
-                   thread_local)]
-        static _KEY: ::std::thread::__ScopedKeyInner<$t> =
-            ::std::thread::__ScopedKeyInner::new();
-        fn _getit() -> &'static ::std::thread::__ScopedKeyInner<$t> { &_KEY }
-        ::std::thread::ScopedKey::new(_getit)
+        #[cfg_attr(target_thread_local, thread_local)]
+        static _KEY: $crate::thread::__ScopedKeyInner<$t> =
+            $crate::thread::__ScopedKeyInner::new();
+        fn _getit() -> &'static $crate::thread::__ScopedKeyInner<$t> { &_KEY }
+        $crate::thread::ScopedKey::new(_getit)
     }}
 }
 
 #[unstable(feature = "scoped_tls",
            reason = "scoped TLS has yet to have wide enough use to fully consider \
-                     stabilizing its interface")]
+                     stabilizing its interface",
+           issue = "27715")]
+#[rustc_deprecated(since = "1.8.0",
+                   reason = "hasn't proven itself over LocalKey")]
 impl<T> ScopedKey<T> {
     #[doc(hidden)]
     pub const fn new(inner: fn() -> &'static imp::KeyInner<T>) -> ScopedKey<T> {
@@ -136,7 +128,8 @@ impl<T> ScopedKey<T> {
     /// # Examples
     ///
     /// ```
-    /// # #![feature(scoped_tls)]
+    /// #![feature(scoped_tls)]
+    ///
     /// scoped_thread_local!(static FOO: u32);
     ///
     /// FOO.set(&100, || {
@@ -189,7 +182,8 @@ impl<T> ScopedKey<T> {
     /// # Examples
     ///
     /// ```no_run
-    /// # #![feature(scoped_tls)]
+    /// #![feature(scoped_tls)]
+    ///
     /// scoped_thread_local!(static FOO: u32);
     ///
     /// FOO.with(|slot| {
@@ -213,16 +207,11 @@ impl<T> ScopedKey<T> {
     }
 }
 
-#[cfg(not(any(windows,
-              target_os = "android",
-              target_os = "ios",
-              target_os = "netbsd",
-              target_os = "openbsd",
-              target_arch = "aarch64",
-              no_elf_tls)))]
+#[cfg(target_thread_local)]
 #[doc(hidden)]
 mod imp {
-    use std::cell::Cell;
+    use cell::Cell;
+    use ptr;
 
     pub struct KeyInner<T> { inner: Cell<*mut T> }
 
@@ -230,24 +219,16 @@ mod imp {
 
     impl<T> KeyInner<T> {
         pub const fn new() -> KeyInner<T> {
-            KeyInner { inner: Cell::new(0 as *mut _) }
+            KeyInner { inner: Cell::new(ptr::null_mut()) }
         }
         pub unsafe fn set(&self, ptr: *mut T) { self.inner.set(ptr); }
         pub unsafe fn get(&self) -> *mut T { self.inner.get() }
     }
 }
 
-#[cfg(any(windows,
-          target_os = "android",
-          target_os = "ios",
-          target_os = "netbsd",
-          target_os = "openbsd",
-          target_arch = "aarch64",
-          no_elf_tls))]
+#[cfg(not(target_thread_local))]
 #[doc(hidden)]
 mod imp {
-    use prelude::v1::*;
-
     use cell::Cell;
     use marker;
     use sys_common::thread_local::StaticKey as OsStaticKey;
@@ -275,7 +256,6 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use cell::Cell;
-    use prelude::v1::*;
 
     scoped_thread_local!(static FOO: u32);
 

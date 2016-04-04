@@ -25,7 +25,14 @@ impl Stdin {
         let fd = FileDesc::new(libc::STDIN_FILENO);
         let ret = fd.read(data);
         fd.into_raw();
-        return ret;
+        ret
+    }
+
+    pub fn read_to_end(&self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        let fd = FileDesc::new(libc::STDIN_FILENO);
+        let ret = fd.read_to_end(buf);
+        fd.into_raw();
+        ret
     }
 }
 
@@ -36,7 +43,7 @@ impl Stdout {
         let fd = FileDesc::new(libc::STDOUT_FILENO);
         let ret = fd.write(data);
         fd.into_raw();
-        return ret;
+        ret
     }
 }
 
@@ -47,7 +54,7 @@ impl Stderr {
         let fd = FileDesc::new(libc::STDERR_FILENO);
         let ret = fd.write(data);
         fd.into_raw();
-        return ret;
+        ret
     }
 }
 

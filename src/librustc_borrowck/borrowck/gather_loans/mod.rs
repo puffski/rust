@@ -19,16 +19,22 @@
 use borrowck::*;
 use borrowck::move_data::MoveData;
 use rustc::middle::expr_use_visitor as euv;
-use rustc::middle::infer;
+use rustc::infer;
 use rustc::middle::mem_categorization as mc;
+use rustc::middle::mem_categorization::Categorization;
 use rustc::middle::region;
-use rustc::middle::ty;
+use rustc::ty::{self, TyCtxt};
+use rustc::traits::ProjectionMode;
 
 use syntax::ast;
 use syntax::codemap::Span;
-use syntax::visit;
-use syntax::visit::Visitor;
-use syntax::ast::{Expr, FnDecl, Block, NodeId, Pat};
+use syntax::ast::NodeId;
+use rustc_front::hir;
+use rustc_front::hir::Expr;
+use rustc_front::intravisit;
+use rustc_front::intravisit::Visitor;
+
+use self::restrictions::RestrictionResult;
 
 mod lifetime;
 mod restrictions;
@@ -37,20 +43,23 @@ mod move_error;
 
 pub fn gather_loans_in_fn<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>,
                                     fn_id: NodeId,
-                                    decl: &ast::FnDecl,
-                                    body: &ast::Block)
+                                    decl: &hir::FnDecl,
+                                    body: &hir::Block)
                                     -> (Vec<Loan<'tcx>>,
                                         move_data::MoveData<'tcx>) {
     let mut glcx = GatherLoanCtxt {
         bccx: bccx,
         all_loans: Vec::new(),
-        item_ub: region::CodeExtent::from_node_id(body.id),
+        item_ub: bccx.tcx.region_maps.node_extent(body.id),
         move_data: MoveData::new(),
         move_error_collector: move_error::MoveErrorCollector::new(),
     };
 
     let param_env = ty::ParameterEnvironment::for_item(bccx.tcx, fn_id);
-    let infcx = infer::new_infer_ctxt(bccx.tcx, &bccx.tcx.tables, Some(param_env), false);
+    let infcx = infer::new_infer_ctxt(bccx.tcx,
+                                      &bccx.tcx.tables,
+                                      Some(param_env),
+                                      ProjectionMode::AnyFinal);
     {
         let mut euv = euv::ExprUseVisitor::new(&mut glcx, &infcx);
         euv.walk_fn(decl, body);
@@ -83,7 +92,7 @@ impl<'a, 'tcx> euv::Delegate<'tcx> for GatherLoanCtxt<'a, 'tcx> {
         match mode {
             euv::Move(move_reason) => {
                 gather_moves::gather_move_from_expr(
-                    self.bccx, &self.move_data, &self.move_error_collector,
+                    self.bccx, &self.move_data, &mut self.move_error_collector,
                     consume_id, cmt, move_reason);
             }
             euv::Copy => { }
@@ -91,7 +100,7 @@ impl<'a, 'tcx> euv::Delegate<'tcx> for GatherLoanCtxt<'a, 'tcx> {
     }
 
     fn matched_pat(&mut self,
-                   matched_pat: &ast::Pat,
+                   matched_pat: &hir::Pat,
                    cmt: mc::cmt<'tcx>,
                    mode: euv::MatchMode) {
         debug!("matched_pat(matched_pat={:?}, cmt={:?}, mode={:?})",
@@ -99,15 +108,15 @@ impl<'a, 'tcx> euv::Delegate<'tcx> for GatherLoanCtxt<'a, 'tcx> {
                cmt,
                mode);
 
-        if let mc::cat_downcast(..) = cmt.cat {
+        if let Categorization::Downcast(..) = cmt.cat {
             gather_moves::gather_match_variant(
-                self.bccx, &self.move_data, &self.move_error_collector,
+                self.bccx, &self.move_data, &mut self.move_error_collector,
                 matched_pat, cmt, mode);
         }
     }
 
     fn consume_pat(&mut self,
-                   consume_pat: &ast::Pat,
+                   consume_pat: &hir::Pat,
                    cmt: mc::cmt<'tcx>,
                    mode: euv::ConsumeMode) {
         debug!("consume_pat(consume_pat={:?}, cmt={:?}, mode={:?})",
@@ -121,7 +130,7 @@ impl<'a, 'tcx> euv::Delegate<'tcx> for GatherLoanCtxt<'a, 'tcx> {
         }
 
         gather_moves::gather_move_from_pat(
-            self.bccx, &self.move_data, &self.move_error_collector,
+            self.bccx, &self.move_data, &mut self.move_error_collector,
             consume_pat, cmt);
     }
 
@@ -248,7 +257,7 @@ fn check_mutability<'a, 'tcx>(bccx: &BorrowckCtxt<'a, 'tcx>,
 }
 
 impl<'a, 'tcx> GatherLoanCtxt<'a, 'tcx> {
-    pub fn tcx(&self) -> &'a ty::ctxt<'tcx> { self.bccx.tcx }
+    pub fn tcx(&self) -> &'a TyCtxt<'tcx> { self.bccx.tcx }
 
     /// Guarantees that `cmt` is assignable, or reports an error.
     fn guarantee_assignment_valid(&mut self,
@@ -261,7 +270,7 @@ impl<'a, 'tcx> GatherLoanCtxt<'a, 'tcx> {
         debug!("guarantee_assignment_valid(assignment_id={}, cmt={:?}) opt_lp={:?}",
                assignment_id, cmt, opt_lp);
 
-        if let mc::cat_local(..) = cmt.cat {
+        if let Categorization::Local(..) = cmt.cat {
             // Only re-assignments to locals require it to be
             // mutable - this is checked in check_loans.
         } else {
@@ -280,7 +289,7 @@ impl<'a, 'tcx> GatherLoanCtxt<'a, 'tcx> {
 
         match opt_lp {
             Some(lp) => {
-                if let mc::cat_local(..) = cmt.cat {
+                if let Categorization::Local(..) = cmt.cat {
                     // Only re-assignments to locals require it to be
                     // mutable - this is checked in check_loans.
                 } else {
@@ -351,50 +360,41 @@ impl<'a, 'tcx> GatherLoanCtxt<'a, 'tcx> {
 
         // Create the loan record (if needed).
         let loan = match restr {
-            restrictions::Safe => {
+            RestrictionResult::Safe => {
                 // No restrictions---no loan record necessary
                 return;
             }
 
-            restrictions::SafeIf(loan_path, restricted_paths) => {
+            RestrictionResult::SafeIf(loan_path, restricted_paths) => {
                 let loan_scope = match loan_region {
                     ty::ReScope(scope) => scope,
 
-                    ty::ReFree(ref fr) => fr.scope.to_code_extent(),
+                    ty::ReFree(ref fr) => fr.scope,
 
-                    ty::ReStatic => {
-                        // If we get here, an error must have been
-                        // reported in
-                        // `lifetime::guarantee_lifetime()`, because
-                        // the only legal ways to have a borrow with a
-                        // static lifetime should not require
-                        // restrictions. To avoid reporting derived
-                        // errors, we just return here without adding
-                        // any loans.
-                        return;
-                    }
+                    ty::ReStatic => self.item_ub,
 
                     ty::ReEmpty |
                     ty::ReLateBound(..) |
                     ty::ReEarlyBound(..) |
-                    ty::ReInfer(..) => {
-                        self.tcx().sess.span_bug(
+                    ty::ReVar(..) |
+                    ty::ReSkolemized(..) => {
+                        span_bug!(
                             cmt.span,
-                            &format!("invalid borrow lifetime: {:?}",
-                                    loan_region));
+                            "invalid borrow lifetime: {:?}",
+                            loan_region);
                     }
                 };
                 debug!("loan_scope = {:?}", loan_scope);
 
-                let borrow_scope = region::CodeExtent::from_node_id(borrow_id);
+                let borrow_scope = self.tcx().region_maps.node_extent(borrow_id);
                 let gen_scope = self.compute_gen_scope(borrow_scope, loan_scope);
                 debug!("gen_scope = {:?}", gen_scope);
 
-                let kill_scope = self.compute_kill_scope(loan_scope, &*loan_path);
+                let kill_scope = self.compute_kill_scope(loan_scope, &loan_path);
                 debug!("kill_scope = {:?}", kill_scope);
 
                 if req_kind == ty::MutBorrow {
-                    self.mark_loan_path_as_mutated(&*loan_path);
+                    self.mark_loan_path_as_mutated(&loan_path);
                 }
 
                 Loan {
@@ -456,7 +456,7 @@ impl<'a, 'tcx> GatherLoanCtxt<'a, 'tcx> {
             LpDowncast(ref base, _) |
             LpExtend(ref base, mc::McInherited, _) |
             LpExtend(ref base, mc::McDeclared, _) => {
-                self.mark_loan_path_as_mutated(&**base);
+                self.mark_loan_path_as_mutated(&base);
             }
             LpExtend(_, mc::McImmutable, _) => {
                 // Nothing to do.
@@ -492,7 +492,9 @@ impl<'a, 'tcx> GatherLoanCtxt<'a, 'tcx> {
         //! come about when variables of `&mut` type are re-borrowed,
         //! as in this example:
         //!
-        //!     fn counter<'a>(v: &'a mut Foo) -> &'a mut uint {
+        //!     struct Foo { counter: u32 }
+        //!
+        //!     fn counter<'a>(v: &'a mut Foo) -> &'a mut u32 {
         //!         &mut v.counter
         //!     }
         //!
@@ -526,10 +528,13 @@ struct StaticInitializerCtxt<'a, 'tcx: 'a> {
 
 impl<'a, 'tcx, 'v> Visitor<'v> for StaticInitializerCtxt<'a, 'tcx> {
     fn visit_expr(&mut self, ex: &Expr) {
-        if let ast::ExprAddrOf(mutbl, ref base) = ex.node {
-            let infcx = infer::new_infer_ctxt(self.bccx.tcx, &self.bccx.tcx.tables, None, false);
+        if let hir::ExprAddrOf(mutbl, ref base) = ex.node {
+            let infcx = infer::new_infer_ctxt(self.bccx.tcx,
+                                              &self.bccx.tcx.tables,
+                                              None,
+                                              ProjectionMode::AnyFinal);
             let mc = mc::MemCategorizationContext::new(&infcx);
-            let base_cmt = mc.cat_expr(&**base).unwrap();
+            let base_cmt = mc.cat_expr(&base).unwrap();
             let borrow_kind = ty::BorrowKind::from_mutbl(mutbl);
             // Check that we don't allow borrows of unsafe static items.
             if check_aliasability(self.bccx, ex.span,
@@ -539,11 +544,11 @@ impl<'a, 'tcx, 'v> Visitor<'v> for StaticInitializerCtxt<'a, 'tcx> {
             }
         }
 
-        visit::walk_expr(self, ex);
+        intravisit::walk_expr(self, ex);
     }
 }
 
-pub fn gather_loans_in_static_initializer(bccx: &mut BorrowckCtxt, expr: &ast::Expr) {
+pub fn gather_loans_in_static_initializer(bccx: &mut BorrowckCtxt, expr: &hir::Expr) {
 
     debug!("gather_loans_in_static_initializer(expr={:?})", expr);
 

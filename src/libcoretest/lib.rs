@@ -8,39 +8,29 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![deny(warnings)]
+
 #![feature(as_unsafe_cell)]
 #![feature(borrow_state)]
 #![feature(box_syntax)]
 #![feature(cell_extras)]
-#![feature(cmp_partial)]
 #![feature(const_fn)]
-#![feature(core)]
+#![feature(copy_from_slice)]
 #![feature(core_float)]
+#![feature(core_private_bignum)]
+#![feature(core_private_diy_float)]
+#![feature(dec2flt)]
+#![feature(decode_utf16)]
+#![feature(fixed_size_array)]
 #![feature(float_extras)]
-#![feature(float_from_str_radix)]
 #![feature(flt2dec)]
-#![feature(fmt_radix)]
-#![feature(hash_default)]
-#![feature(hasher_write)]
 #![feature(iter_arith)]
-#![feature(iter_arith)]
-#![feature(iter_cmp)]
-#![feature(iter_empty)]
-#![feature(iter_idx)]
-#![feature(iter_iterate)]
-#![feature(iter_min_max)]
-#![feature(iter_once)]
-#![feature(iter_order)]
-#![feature(iter_unfold)]
 #![feature(libc)]
 #![feature(nonzero)]
-#![feature(num_bits_bytes)]
+#![feature(peekable_is_empty)]
 #![feature(ptr_as_ref)]
 #![feature(rand)]
-#![feature(range_inclusive)]
 #![feature(raw)]
-#![feature(result_expect)]
-#![feature(slice_bytes)]
 #![feature(slice_patterns)]
 #![feature(step_by)]
 #![feature(test)]
@@ -55,12 +45,15 @@ extern crate rustc_unicode;
 extern crate rand;
 
 mod any;
+mod array;
 mod atomic;
 mod cell;
 mod char;
+mod clone;
 mod cmp;
 mod fmt;
 mod hash;
+mod intrinsics;
 mod iter;
 mod mem;
 mod nonzero;

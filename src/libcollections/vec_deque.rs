@@ -18,11 +18,10 @@
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
-use core::prelude::*;
-
 use core::cmp::Ordering;
 use core::fmt;
-use core::iter::{self, repeat, FromIterator, RandomAccessIterator};
+use core::iter::{repeat, FromIterator};
+use core::mem;
 use core::ops::{Index, IndexMut};
 use core::ptr;
 use core::slice;
@@ -32,15 +31,22 @@ use core::cmp;
 
 use alloc::raw_vec::RawVec;
 
+use super::range::RangeArgument;
+
 const INITIAL_CAPACITY: usize = 7; // 2^3 - 1
 const MINIMUM_CAPACITY: usize = 1; // 2 - 1
+#[cfg(target_pointer_width = "32")]
+const MAXIMUM_ZST_CAPACITY: usize = 1 << (32 - 1); // Largest possible power of two
+#[cfg(target_pointer_width = "64")]
+const MAXIMUM_ZST_CAPACITY: usize = 1 << (64 - 1); // Largest possible power of two
 
-/// `VecDeque` is a growable ring buffer, which can be used as a
-/// double-ended queue efficiently.
+/// `VecDeque` is a growable ring buffer, which can be used as a double-ended
+/// queue efficiently.
 ///
-/// The "default" usage of this type as a queue is to use `push_back` to add to the queue, and
-/// `pop_front` to remove from the queue. `extend` and `append` push onto the back in this manner,
-/// and iterating over `VecDeque` goes front to back.
+/// The "default" usage of this type as a queue is to use `push_back` to add to
+/// the queue, and `pop_front` to remove from the queue. `extend` and `append`
+/// push onto the back in this manner, and iterating over `VecDeque` goes front
+/// to back.
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct VecDeque<T> {
     // tail and head are pointers into the buffer. Tail always points
@@ -48,7 +54,6 @@ pub struct VecDeque<T> {
     // to where data should be written.
     // If tail == head the buffer is empty. The length of the ringbuffer
     // is defined as the distance between the two.
-
     tail: usize,
     head: usize,
     buf: RawVec<T>,
@@ -63,8 +68,14 @@ impl<T: Clone> Clone for VecDeque<T> {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T> Drop for VecDeque<T> {
+    #[unsafe_destructor_blind_to_params]
     fn drop(&mut self) {
-        self.clear();
+        let (front, back) = self.as_mut_slices();
+        unsafe {
+            // use drop for [T]
+            ptr::drop_in_place(front);
+            ptr::drop_in_place(back);
+        }
         // RawVec handles deallocation
     }
 }
@@ -72,7 +83,9 @@ impl<T> Drop for VecDeque<T> {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T> Default for VecDeque<T> {
     #[inline]
-    fn default() -> VecDeque<T> { VecDeque::new() }
+    fn default() -> VecDeque<T> {
+        VecDeque::new()
+    }
 }
 
 impl<T> VecDeque<T> {
@@ -85,7 +98,12 @@ impl<T> VecDeque<T> {
     /// Marginally more convenient
     #[inline]
     fn cap(&self) -> usize {
-        self.buf.cap()
+        if mem::size_of::<T>() == 0 {
+            // For zero sized types, we are always at maximum capacity
+            MAXIMUM_ZST_CAPACITY
+        } else {
+            self.buf.cap()
+        }
     }
 
     /// Turn ptr into a slice
@@ -114,12 +132,16 @@ impl<T> VecDeque<T> {
 
     /// Returns true if and only if the buffer is at capacity
     #[inline]
-    fn is_full(&self) -> bool { self.cap() - self.len() == 1 }
+    fn is_full(&self) -> bool {
+        self.cap() - self.len() == 1
+    }
 
     /// Returns the index in the underlying buffer for a given logical element
     /// index.
     #[inline]
-    fn wrap_index(&self, idx: usize) -> usize { wrap_index(idx, self.cap()) }
+    fn wrap_index(&self, idx: usize) -> usize {
+        wrap_index(idx, self.cap())
+    }
 
     /// Returns the index in the underlying buffer for a given logical element
     /// index + addend.
@@ -138,27 +160,165 @@ impl<T> VecDeque<T> {
     /// Copies a contiguous block of memory len long from src to dst
     #[inline]
     unsafe fn copy(&self, dst: usize, src: usize, len: usize) {
-        debug_assert!(dst + len <= self.cap(), "dst={} src={} len={} cap={}", dst, src, len,
+        debug_assert!(dst + len <= self.cap(),
+                      "cpy dst={} src={} len={} cap={}",
+                      dst,
+                      src,
+                      len,
                       self.cap());
-        debug_assert!(src + len <= self.cap(), "dst={} src={} len={} cap={}", dst, src, len,
+        debug_assert!(src + len <= self.cap(),
+                      "cpy dst={} src={} len={} cap={}",
+                      dst,
+                      src,
+                      len,
                       self.cap());
-        ptr::copy(
-            self.ptr().offset(src as isize),
-            self.ptr().offset(dst as isize),
-            len);
+        ptr::copy(self.ptr().offset(src as isize),
+                  self.ptr().offset(dst as isize),
+                  len);
     }
 
     /// Copies a contiguous block of memory len long from src to dst
     #[inline]
     unsafe fn copy_nonoverlapping(&self, dst: usize, src: usize, len: usize) {
-        debug_assert!(dst + len <= self.cap(), "dst={} src={} len={} cap={}", dst, src, len,
+        debug_assert!(dst + len <= self.cap(),
+                      "cno dst={} src={} len={} cap={}",
+                      dst,
+                      src,
+                      len,
                       self.cap());
-        debug_assert!(src + len <= self.cap(), "dst={} src={} len={} cap={}", dst, src, len,
+        debug_assert!(src + len <= self.cap(),
+                      "cno dst={} src={} len={} cap={}",
+                      dst,
+                      src,
+                      len,
                       self.cap());
-        ptr::copy_nonoverlapping(
-            self.ptr().offset(src as isize),
-            self.ptr().offset(dst as isize),
-            len);
+        ptr::copy_nonoverlapping(self.ptr().offset(src as isize),
+                                 self.ptr().offset(dst as isize),
+                                 len);
+    }
+
+    /// Copies a potentially wrapping block of memory len long from src to dest.
+    /// (abs(dst - src) + len) must be no larger than cap() (There must be at
+    /// most one continuous overlapping region between src and dest).
+    unsafe fn wrap_copy(&self, dst: usize, src: usize, len: usize) {
+        #[allow(dead_code)]
+        fn diff(a: usize, b: usize) -> usize {
+            if a <= b {
+                b - a
+            } else {
+                a - b
+            }
+        }
+        debug_assert!(cmp::min(diff(dst, src), self.cap() - diff(dst, src)) + len <= self.cap(),
+                      "wrc dst={} src={} len={} cap={}",
+                      dst,
+                      src,
+                      len,
+                      self.cap());
+
+        if src == dst || len == 0 {
+            return;
+        }
+
+        let dst_after_src = self.wrap_sub(dst, src) < len;
+
+        let src_pre_wrap_len = self.cap() - src;
+        let dst_pre_wrap_len = self.cap() - dst;
+        let src_wraps = src_pre_wrap_len < len;
+        let dst_wraps = dst_pre_wrap_len < len;
+
+        match (dst_after_src, src_wraps, dst_wraps) {
+            (_, false, false) => {
+                // src doesn't wrap, dst doesn't wrap
+                //
+                //        S . . .
+                // 1 [_ _ A A B B C C _]
+                // 2 [_ _ A A A A B B _]
+                //            D . . .
+                //
+                self.copy(dst, src, len);
+            }
+            (false, false, true) => {
+                // dst before src, src doesn't wrap, dst wraps
+                //
+                //    S . . .
+                // 1 [A A B B _ _ _ C C]
+                // 2 [A A B B _ _ _ A A]
+                // 3 [B B B B _ _ _ A A]
+                //    . .           D .
+                //
+                self.copy(dst, src, dst_pre_wrap_len);
+                self.copy(0, src + dst_pre_wrap_len, len - dst_pre_wrap_len);
+            }
+            (true, false, true) => {
+                // src before dst, src doesn't wrap, dst wraps
+                //
+                //              S . . .
+                // 1 [C C _ _ _ A A B B]
+                // 2 [B B _ _ _ A A B B]
+                // 3 [B B _ _ _ A A A A]
+                //    . .           D .
+                //
+                self.copy(0, src + dst_pre_wrap_len, len - dst_pre_wrap_len);
+                self.copy(dst, src, dst_pre_wrap_len);
+            }
+            (false, true, false) => {
+                // dst before src, src wraps, dst doesn't wrap
+                //
+                //    . .           S .
+                // 1 [C C _ _ _ A A B B]
+                // 2 [C C _ _ _ B B B B]
+                // 3 [C C _ _ _ B B C C]
+                //              D . . .
+                //
+                self.copy(dst, src, src_pre_wrap_len);
+                self.copy(dst + src_pre_wrap_len, 0, len - src_pre_wrap_len);
+            }
+            (true, true, false) => {
+                // src before dst, src wraps, dst doesn't wrap
+                //
+                //    . .           S .
+                // 1 [A A B B _ _ _ C C]
+                // 2 [A A A A _ _ _ C C]
+                // 3 [C C A A _ _ _ C C]
+                //    D . . .
+                //
+                self.copy(dst + src_pre_wrap_len, 0, len - src_pre_wrap_len);
+                self.copy(dst, src, src_pre_wrap_len);
+            }
+            (false, true, true) => {
+                // dst before src, src wraps, dst wraps
+                //
+                //    . . .         S .
+                // 1 [A B C D _ E F G H]
+                // 2 [A B C D _ E G H H]
+                // 3 [A B C D _ E G H A]
+                // 4 [B C C D _ E G H A]
+                //    . .         D . .
+                //
+                debug_assert!(dst_pre_wrap_len > src_pre_wrap_len);
+                let delta = dst_pre_wrap_len - src_pre_wrap_len;
+                self.copy(dst, src, src_pre_wrap_len);
+                self.copy(dst + src_pre_wrap_len, 0, delta);
+                self.copy(0, delta, len - dst_pre_wrap_len);
+            }
+            (true, true, true) => {
+                // src before dst, src wraps, dst wraps
+                //
+                //    . .         S . .
+                // 1 [A B C D _ E F G H]
+                // 2 [A A B D _ E F G H]
+                // 3 [H A B D _ E F G H]
+                // 4 [H A B D _ E F F G]
+                //    . . .         D .
+                //
+                debug_assert!(src_pre_wrap_len > dst_pre_wrap_len);
+                let delta = src_pre_wrap_len - dst_pre_wrap_len;
+                self.copy(delta, 0, len - src_pre_wrap_len);
+                self.copy(0, self.cap() - delta, delta);
+                self.copy(dst, src, dst_pre_wrap_len);
+            }
+        }
     }
 
     /// Frobs the head and tail sections around to handle the fact that we
@@ -181,13 +341,16 @@ impl<T> VecDeque<T> {
         //              H                 T
         // C [o o o o o . . . . . . . . . o o ]
 
-        if self.tail <= self.head { // A
+        if self.tail <= self.head {
+            // A
             // Nop
-        } else if self.head < old_cap - self.tail { // B
+        } else if self.head < old_cap - self.tail {
+            // B
             self.copy_nonoverlapping(old_cap, 0, self.head);
             self.head += old_cap;
             debug_assert!(self.head > self.tail);
-        } else { // C
+        } else {
+            // C
             let new_tail = new_cap - (old_cap - self.tail);
             self.copy_nonoverlapping(new_tail, self.tail, old_cap - self.tail);
             self.tail = new_tail;
@@ -231,7 +394,7 @@ impl<T> VecDeque<T> {
     /// buf.push_back(3);
     /// buf.push_back(4);
     /// buf.push_back(5);
-    /// assert_eq!(buf.get(1).unwrap(), &4);
+    /// assert_eq!(buf.get(1), Some(&4));
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn get(&self, index: usize) -> Option<&T> {
@@ -296,7 +459,8 @@ impl<T> VecDeque<T> {
         let ri = self.wrap_add(self.tail, i);
         let rj = self.wrap_add(self.tail, j);
         unsafe {
-            ptr::swap(self.ptr().offset(ri as isize), self.ptr().offset(rj as isize))
+            ptr::swap(self.ptr().offset(ri as isize),
+                      self.ptr().offset(rj as isize))
         }
     }
 
@@ -313,7 +477,9 @@ impl<T> VecDeque<T> {
     /// ```
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn capacity(&self) -> usize { self.cap() - 1 }
+    pub fn capacity(&self) -> usize {
+        self.cap() - 1
+    }
 
     /// Reserves the minimum capacity for exactly `additional` more elements to be inserted in the
     /// given `VecDeque`. Does nothing if the capacity is already sufficient.
@@ -360,14 +526,15 @@ impl<T> VecDeque<T> {
     pub fn reserve(&mut self, additional: usize) {
         let old_cap = self.cap();
         let used_cap = self.len() + 1;
-        let new_cap = used_cap
-            .checked_add(additional)
-            .and_then(|needed_cap| needed_cap.checked_next_power_of_two())
-            .expect("capacity overflow");
+        let new_cap = used_cap.checked_add(additional)
+                              .and_then(|needed_cap| needed_cap.checked_next_power_of_two())
+                              .expect("capacity overflow");
 
         if new_cap > self.capacity() {
             self.buf.reserve_exact(used_cap, new_cap - used_cap);
-            unsafe { self.handle_cap_increase(old_cap); }
+            unsafe {
+                self.handle_cap_increase(old_cap);
+            }
         }
     }
 
@@ -379,7 +546,6 @@ impl<T> VecDeque<T> {
     /// # Examples
     ///
     /// ```
-    /// # #![feature(collections)]
     /// use std::collections::VecDeque;
     ///
     /// let mut buf = VecDeque::with_capacity(15);
@@ -388,6 +554,7 @@ impl<T> VecDeque<T> {
     /// buf.shrink_to_fit();
     /// assert!(buf.capacity() >= 4);
     /// ```
+    #[stable(feature = "deque_extras_15", since = "1.5.0")]
     pub fn shrink_to_fit(&mut self) {
         // +1 since the ringbuffer always leaves one space empty
         // len + 1 can't overflow for an existing, well-formed ringbuffer.
@@ -455,7 +622,8 @@ impl<T> VecDeque<T> {
     /// # Examples
     ///
     /// ```
-    /// # #![feature(deque_extras)]
+    /// #![feature(deque_extras)]
+    ///
     /// use std::collections::VecDeque;
     ///
     /// let mut buf = VecDeque::new();
@@ -467,7 +635,8 @@ impl<T> VecDeque<T> {
     /// assert_eq!(Some(&5), buf.get(0));
     /// ```
     #[unstable(feature = "deque_extras",
-               reason = "matches collection reform specification; waiting on panic semantics")]
+               reason = "matches collection reform specification; waiting on panic semantics",
+               issue = "27788")]
     pub fn truncate(&mut self, len: usize) {
         for _ in len..self.len() {
             self.pop_back();
@@ -494,7 +663,7 @@ impl<T> VecDeque<T> {
         Iter {
             tail: self.tail,
             head: self.head,
-            ring: unsafe { self.buffer_as_slice() }
+            ring: unsafe { self.buffer_as_slice() },
         }
     }
 
@@ -527,8 +696,7 @@ impl<T> VecDeque<T> {
     /// Returns a pair of slices which contain, in order, the contents of the
     /// `VecDeque`.
     #[inline]
-    #[unstable(feature = "deque_extras",
-               reason = "matches collection reform specification, waiting for dust to settle")]
+    #[stable(feature = "deque_extras_15", since = "1.5.0")]
     pub fn as_slices(&self) -> (&[T], &[T]) {
         unsafe {
             let contiguous = self.is_contiguous();
@@ -547,8 +715,7 @@ impl<T> VecDeque<T> {
     /// Returns a pair of slices which contain, in order, the contents of the
     /// `VecDeque`.
     #[inline]
-    #[unstable(feature = "deque_extras",
-               reason = "matches collection reform specification, waiting for dust to settle")]
+    #[stable(feature = "deque_extras_15", since = "1.5.0")]
     pub fn as_mut_slices(&mut self) -> (&mut [T], &mut [T]) {
         unsafe {
             let contiguous = self.is_contiguous();
@@ -558,7 +725,7 @@ impl<T> VecDeque<T> {
 
             if contiguous {
                 let (empty, buf) = buf.split_at_mut(0);
-                (&mut buf[tail .. head], empty)
+                (&mut buf[tail..head], empty)
             } else {
                 let (mid, right) = buf.split_at_mut(tail);
                 let (left, _) = mid.split_at_mut(head);
@@ -581,7 +748,9 @@ impl<T> VecDeque<T> {
     /// assert_eq!(v.len(), 1);
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn len(&self) -> usize { count(self.tail, self.head, self.cap()) }
+    pub fn len(&self) -> usize {
+        count(self.tail, self.head, self.cap())
+    }
 
     /// Returns true if the buffer contains no elements
     ///
@@ -596,28 +765,92 @@ impl<T> VecDeque<T> {
     /// assert!(!v.is_empty());
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
-    pub fn is_empty(&self) -> bool { self.len() == 0 }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 
-    /// Creates a draining iterator that clears the `VecDeque` and iterates over
-    /// the removed items from start to end.
+    /// Create a draining iterator that removes the specified range in the
+    /// `VecDeque` and yields the removed items.
+    ///
+    /// Note 1: The element range is removed even if the iterator is not
+    /// consumed until the end.
+    ///
+    /// Note 2: It is unspecified how many elements are removed from the deque,
+    /// if the `Drain` value is not dropped, but the borrow it holds expires
+    /// (eg. due to mem::forget).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the starting point is greater than the end point or if
+    /// the end point is greater than the length of the vector.
     ///
     /// # Examples
     ///
     /// ```
-    /// # #![feature(drain)]
     /// use std::collections::VecDeque;
+
+    /// let mut v: VecDeque<_> = vec![1, 2, 3].into_iter().collect();
+    /// assert_eq!(vec![3].into_iter().collect::<VecDeque<_>>(), v.drain(2..).collect());
+    /// assert_eq!(vec![1, 2].into_iter().collect::<VecDeque<_>>(), v);
     ///
-    /// let mut v = VecDeque::new();
-    /// v.push_back(1);
-    /// assert_eq!(v.drain().next(), Some(1));
+    /// // A full range clears all contents
+    /// v.drain(..);
     /// assert!(v.is_empty());
     /// ```
     #[inline]
-    #[unstable(feature = "drain",
-               reason = "matches collection reform specification, waiting for dust to settle")]
-    pub fn drain(&mut self) -> Drain<T> {
+    #[stable(feature = "drain", since = "1.6.0")]
+    pub fn drain<R>(&mut self, range: R) -> Drain<T>
+        where R: RangeArgument<usize>
+    {
+        // Memory safety
+        //
+        // When the Drain is first created, the source deque is shortened to
+        // make sure no uninitialized or moved-from elements are accessible at
+        // all if the Drain's destructor never gets to run.
+        //
+        // Drain will ptr::read out the values to remove.
+        // When finished, the remaining data will be copied back to cover the hole,
+        // and the head/tail values will be restored correctly.
+        //
+        let len = self.len();
+        let start = *range.start().unwrap_or(&0);
+        let end = *range.end().unwrap_or(&len);
+        assert!(start <= end, "drain lower bound was too large");
+        assert!(end <= len, "drain upper bound was too large");
+
+        // The deque's elements are parted into three segments:
+        // * self.tail  -> drain_tail
+        // * drain_tail -> drain_head
+        // * drain_head -> self.head
+        //
+        // T = self.tail; H = self.head; t = drain_tail; h = drain_head
+        //
+        // We store drain_tail as self.head, and drain_head and self.head as
+        // after_tail and after_head respectively on the Drain. This also
+        // truncates the effective array such that if the Drain is leaked, we
+        // have forgotten about the potentially moved values after the start of
+        // the drain.
+        //
+        //        T   t   h   H
+        // [. . . o o x x o o . . .]
+        //
+        let drain_tail = self.wrap_add(self.tail, start);
+        let drain_head = self.wrap_add(self.tail, end);
+        let head = self.head;
+
+        // "forget" about the values after the start of the drain until after
+        // the drain is complete and the Drain destructor is run.
+        self.head = drain_tail;
+
         Drain {
-            inner: self,
+            deque: self as *mut _,
+            after_tail: drain_head,
+            after_head: head,
+            iter: Iter {
+                tail: drain_tail,
+                head: drain_head,
+                ring: unsafe { self.buffer_as_mut_slice() },
+            },
         }
     }
 
@@ -636,7 +869,7 @@ impl<T> VecDeque<T> {
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn clear(&mut self) {
-        self.drain();
+        self.drain(..);
     }
 
     /// Provides a reference to the front element, or `None` if the sequence is
@@ -656,7 +889,11 @@ impl<T> VecDeque<T> {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn front(&self) -> Option<&T> {
-        if !self.is_empty() { Some(&self[0]) } else { None }
+        if !self.is_empty() {
+            Some(&self[0])
+        } else {
+            None
+        }
     }
 
     /// Provides a mutable reference to the front element, or `None` if the
@@ -680,7 +917,11 @@ impl<T> VecDeque<T> {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn front_mut(&mut self) -> Option<&mut T> {
-        if !self.is_empty() { Some(&mut self[0]) } else { None }
+        if !self.is_empty() {
+            Some(&mut self[0])
+        } else {
+            None
+        }
     }
 
     /// Provides a reference to the back element, or `None` if the sequence is
@@ -700,7 +941,11 @@ impl<T> VecDeque<T> {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn back(&self) -> Option<&T> {
-        if !self.is_empty() { Some(&self[self.len() - 1]) } else { None }
+        if !self.is_empty() {
+            Some(&self[self.len() - 1])
+        } else {
+            None
+        }
     }
 
     /// Provides a mutable reference to the back element, or `None` if the
@@ -725,7 +970,11 @@ impl<T> VecDeque<T> {
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn back_mut(&mut self) -> Option<&mut T> {
         let len = self.len();
-        if !self.is_empty() { Some(&mut self[len - 1]) } else { None }
+        if !self.is_empty() {
+            Some(&mut self[len - 1])
+        } else {
+            None
+        }
     }
 
     /// Removes the first element and returns it, or `None` if the sequence is
@@ -772,13 +1021,17 @@ impl<T> VecDeque<T> {
         if self.is_full() {
             let old_cap = self.cap();
             self.buf.double();
-            unsafe { self.handle_cap_increase(old_cap); }
+            unsafe {
+                self.handle_cap_increase(old_cap);
+            }
             debug_assert!(!self.is_full());
         }
 
         self.tail = self.wrap_sub(self.tail, 1);
         let tail = self.tail;
-        unsafe { self.buffer_write(tail, value); }
+        unsafe {
+            self.buffer_write(tail, value);
+        }
     }
 
     /// Appends an element to the back of a buffer
@@ -798,7 +1051,9 @@ impl<T> VecDeque<T> {
         if self.is_full() {
             let old_cap = self.cap();
             self.buf.double();
-            unsafe { self.handle_cap_increase(old_cap); }
+            unsafe {
+                self.handle_cap_increase(old_cap);
+            }
             debug_assert!(!self.is_full());
         }
 
@@ -847,21 +1102,21 @@ impl<T> VecDeque<T> {
     /// # Examples
     ///
     /// ```
-    /// # #![feature(deque_extras)]
     /// use std::collections::VecDeque;
     ///
     /// let mut buf = VecDeque::new();
-    /// assert_eq!(buf.swap_back_remove(0), None);
-    /// buf.push_back(5);
-    /// buf.push_back(99);
-    /// buf.push_back(15);
-    /// buf.push_back(20);
-    /// buf.push_back(10);
-    /// assert_eq!(buf.swap_back_remove(1), Some(99));
+    /// assert_eq!(buf.swap_remove_back(0), None);
+    /// buf.push_back(1);
+    /// buf.push_back(2);
+    /// buf.push_back(3);
+    ///
+    /// assert_eq!(buf.swap_remove_back(0), Some(1));
+    /// assert_eq!(buf.len(), 2);
+    /// assert_eq!(buf[0], 3);
+    /// assert_eq!(buf[1], 2);
     /// ```
-    #[unstable(feature = "deque_extras",
-               reason = "the naming of this function may be altered")]
-    pub fn swap_back_remove(&mut self, index: usize) -> Option<T> {
+    #[stable(feature = "deque_extras_15", since = "1.5.0")]
+    pub fn swap_remove_back(&mut self, index: usize) -> Option<T> {
         let length = self.len();
         if length > 0 && index < length - 1 {
             self.swap(index, length - 1);
@@ -881,21 +1136,21 @@ impl<T> VecDeque<T> {
     /// # Examples
     ///
     /// ```
-    /// # #![feature(deque_extras)]
     /// use std::collections::VecDeque;
     ///
     /// let mut buf = VecDeque::new();
-    /// assert_eq!(buf.swap_front_remove(0), None);
-    /// buf.push_back(15);
-    /// buf.push_back(5);
-    /// buf.push_back(10);
-    /// buf.push_back(99);
-    /// buf.push_back(20);
-    /// assert_eq!(buf.swap_front_remove(3), Some(99));
+    /// assert_eq!(buf.swap_remove_front(0), None);
+    /// buf.push_back(1);
+    /// buf.push_back(2);
+    /// buf.push_back(3);
+    ///
+    /// assert_eq!(buf.swap_remove_front(2), Some(3));
+    /// assert_eq!(buf.len(), 2);
+    /// assert_eq!(buf[0], 2);
+    /// assert_eq!(buf[1], 1);
     /// ```
-    #[unstable(feature = "deque_extras",
-               reason = "the naming of this function may be altered")]
-    pub fn swap_front_remove(&mut self, index: usize) -> Option<T> {
+    #[stable(feature = "deque_extras_15", since = "1.5.0")]
+    pub fn swap_remove_front(&mut self, index: usize) -> Option<T> {
         let length = self.len();
         if length > 0 && index < length && index != 0 {
             self.swap(index, 0);
@@ -915,7 +1170,6 @@ impl<T> VecDeque<T> {
     ///
     /// # Examples
     /// ```
-    /// # #![feature(collections)]
     /// use std::collections::VecDeque;
     ///
     /// let mut buf = VecDeque::new();
@@ -924,12 +1178,15 @@ impl<T> VecDeque<T> {
     /// buf.insert(1, 11);
     /// assert_eq!(Some(&11), buf.get(1));
     /// ```
+    #[stable(feature = "deque_extras_15", since = "1.5.0")]
     pub fn insert(&mut self, index: usize, value: T) {
         assert!(index <= self.len(), "index out of bounds");
         if self.is_full() {
             let old_cap = self.cap();
             self.buf.double();
-            unsafe { self.handle_cap_increase(old_cap); }
+            unsafe {
+                self.handle_cap_increase(old_cap);
+            }
             debug_assert!(!self.is_full());
         }
 
@@ -962,7 +1219,9 @@ impl<T> VecDeque<T> {
 
         let contiguous = self.is_contiguous();
 
-        match (contiguous, distance_to_tail <= distance_to_head, idx >= self.tail) {
+        match (contiguous,
+               distance_to_tail <= distance_to_head,
+               idx >= self.tail) {
             (true, true, _) if index == 0 => {
                 // push_front
                 //
@@ -975,134 +1234,148 @@ impl<T> VecDeque<T> {
                 //
 
                 self.tail = self.wrap_sub(self.tail, 1);
-            },
-            (true, true, _) => unsafe {
-                // contiguous, insert closer to tail:
-                //
-                //             T   I         H
-                //      [. . . o o A o o o o . . . . . .]
-                //
-                //           T               H
-                //      [. . o o I A o o o o . . . . . .]
-                //           M M
-                //
-                // contiguous, insert closer to tail and tail is 0:
-                //
-                //
-                //       T   I         H
-                //      [o o A o o o o . . . . . . . . .]
-                //
-                //                       H             T
-                //      [o I A o o o o o . . . . . . . o]
-                //       M                             M
+            }
+            (true, true, _) => {
+                unsafe {
+                    // contiguous, insert closer to tail:
+                    //
+                    //             T   I         H
+                    //      [. . . o o A o o o o . . . . . .]
+                    //
+                    //           T               H
+                    //      [. . o o I A o o o o . . . . . .]
+                    //           M M
+                    //
+                    // contiguous, insert closer to tail and tail is 0:
+                    //
+                    //
+                    //       T   I         H
+                    //      [o o A o o o o . . . . . . . . .]
+                    //
+                    //                       H             T
+                    //      [o I A o o o o o . . . . . . . o]
+                    //       M                             M
 
-                let new_tail = self.wrap_sub(self.tail, 1);
+                    let new_tail = self.wrap_sub(self.tail, 1);
 
-                self.copy(new_tail, self.tail, 1);
-                // Already moved the tail, so we only copy `index - 1` elements.
-                self.copy(self.tail, self.tail + 1, index - 1);
+                    self.copy(new_tail, self.tail, 1);
+                    // Already moved the tail, so we only copy `index - 1` elements.
+                    self.copy(self.tail, self.tail + 1, index - 1);
 
-                self.tail = new_tail;
-            },
-            (true, false, _) => unsafe {
-                //  contiguous, insert closer to head:
-                //
-                //             T       I     H
-                //      [. . . o o o o A o o . . . . . .]
-                //
-                //             T               H
-                //      [. . . o o o o I A o o . . . . .]
-                //                       M M M
+                    self.tail = new_tail;
+                }
+            }
+            (true, false, _) => {
+                unsafe {
+                    //  contiguous, insert closer to head:
+                    //
+                    //             T       I     H
+                    //      [. . . o o o o A o o . . . . . .]
+                    //
+                    //             T               H
+                    //      [. . . o o o o I A o o . . . . .]
+                    //                       M M M
 
-                self.copy(idx + 1, idx, self.head - idx);
-                self.head = self.wrap_add(self.head, 1);
-            },
-            (false, true, true) => unsafe {
-                // discontiguous, insert closer to tail, tail section:
-                //
-                //                   H         T   I
-                //      [o o o o o o . . . . . o o A o o]
-                //
-                //                   H       T
-                //      [o o o o o o . . . . o o I A o o]
-                //                           M M
+                    self.copy(idx + 1, idx, self.head - idx);
+                    self.head = self.wrap_add(self.head, 1);
+                }
+            }
+            (false, true, true) => {
+                unsafe {
+                    // discontiguous, insert closer to tail, tail section:
+                    //
+                    //                   H         T   I
+                    //      [o o o o o o . . . . . o o A o o]
+                    //
+                    //                   H       T
+                    //      [o o o o o o . . . . o o I A o o]
+                    //                           M M
 
-                self.copy(self.tail - 1, self.tail, index);
-                self.tail -= 1;
-            },
-            (false, false, true) => unsafe {
-                // discontiguous, insert closer to head, tail section:
-                //
-                //           H             T         I
-                //      [o o . . . . . . . o o o o o A o]
-                //
-                //             H           T
-                //      [o o o . . . . . . o o o o o I A]
-                //       M M M                         M
+                    self.copy(self.tail - 1, self.tail, index);
+                    self.tail -= 1;
+                }
+            }
+            (false, false, true) => {
+                unsafe {
+                    // discontiguous, insert closer to head, tail section:
+                    //
+                    //           H             T         I
+                    //      [o o . . . . . . . o o o o o A o]
+                    //
+                    //             H           T
+                    //      [o o o . . . . . . o o o o o I A]
+                    //       M M M                         M
 
-                // copy elements up to new head
-                self.copy(1, 0, self.head);
+                    // copy elements up to new head
+                    self.copy(1, 0, self.head);
 
-                // copy last element into empty spot at bottom of buffer
-                self.copy(0, self.cap() - 1, 1);
+                    // copy last element into empty spot at bottom of buffer
+                    self.copy(0, self.cap() - 1, 1);
 
-                // move elements from idx to end forward not including ^ element
-                self.copy(idx + 1, idx, self.cap() - 1 - idx);
+                    // move elements from idx to end forward not including ^ element
+                    self.copy(idx + 1, idx, self.cap() - 1 - idx);
 
-                self.head += 1;
-            },
-            (false, true, false) if idx == 0 => unsafe {
-                // discontiguous, insert is closer to tail, head section,
-                // and is at index zero in the internal buffer:
-                //
-                //       I                   H     T
-                //      [A o o o o o o o o o . . . o o o]
-                //
-                //                           H   T
-                //      [A o o o o o o o o o . . o o o I]
-                //                               M M M
+                    self.head += 1;
+                }
+            }
+            (false, true, false) if idx == 0 => {
+                unsafe {
+                    // discontiguous, insert is closer to tail, head section,
+                    // and is at index zero in the internal buffer:
+                    //
+                    //       I                   H     T
+                    //      [A o o o o o o o o o . . . o o o]
+                    //
+                    //                           H   T
+                    //      [A o o o o o o o o o . . o o o I]
+                    //                               M M M
 
-                // copy elements up to new tail
-                self.copy(self.tail - 1, self.tail, self.cap() - self.tail);
+                    // copy elements up to new tail
+                    self.copy(self.tail - 1, self.tail, self.cap() - self.tail);
 
-                // copy last element into empty spot at bottom of buffer
-                self.copy(self.cap() - 1, 0, 1);
+                    // copy last element into empty spot at bottom of buffer
+                    self.copy(self.cap() - 1, 0, 1);
 
-                self.tail -= 1;
-            },
-            (false, true, false) => unsafe {
-                // discontiguous, insert closer to tail, head section:
-                //
-                //             I             H     T
-                //      [o o o A o o o o o o . . . o o o]
-                //
-                //                           H   T
-                //      [o o I A o o o o o o . . o o o o]
-                //       M M                     M M M M
+                    self.tail -= 1;
+                }
+            }
+            (false, true, false) => {
+                unsafe {
+                    // discontiguous, insert closer to tail, head section:
+                    //
+                    //             I             H     T
+                    //      [o o o A o o o o o o . . . o o o]
+                    //
+                    //                           H   T
+                    //      [o o I A o o o o o o . . o o o o]
+                    //       M M                     M M M M
 
-                // copy elements up to new tail
-                self.copy(self.tail - 1, self.tail, self.cap() - self.tail);
+                    // copy elements up to new tail
+                    self.copy(self.tail - 1, self.tail, self.cap() - self.tail);
 
-                // copy last element into empty spot at bottom of buffer
-                self.copy(self.cap() - 1, 0, 1);
+                    // copy last element into empty spot at bottom of buffer
+                    self.copy(self.cap() - 1, 0, 1);
 
-                // move elements from idx-1 to end forward not including ^ element
-                self.copy(0, 1, idx - 1);
+                    // move elements from idx-1 to end forward not including ^ element
+                    self.copy(0, 1, idx - 1);
 
-                self.tail -= 1;
-            },
-            (false, false, false) => unsafe {
-                // discontiguous, insert closer to head, head section:
-                //
-                //               I     H           T
-                //      [o o o o A o o . . . . . . o o o]
-                //
-                //                     H           T
-                //      [o o o o I A o o . . . . . o o o]
-                //                 M M M
+                    self.tail -= 1;
+                }
+            }
+            (false, false, false) => {
+                unsafe {
+                    // discontiguous, insert closer to head, head section:
+                    //
+                    //               I     H           T
+                    //      [o o o o A o o . . . . . . o o o]
+                    //
+                    //                     H           T
+                    //      [o o o o I A o o . . . . . o o o]
+                    //                 M M M
 
-                self.copy(idx + 1, idx, self.head - idx);
-                self.head += 1;
+                    self.copy(idx + 1, idx, self.head - idx);
+                    self.head += 1;
+                }
             }
         }
 
@@ -1123,12 +1396,12 @@ impl<T> VecDeque<T> {
     /// use std::collections::VecDeque;
     ///
     /// let mut buf = VecDeque::new();
-    /// buf.push_back(5);
-    /// buf.push_back(10);
-    /// buf.push_back(12);
-    /// buf.push_back(15);
-    /// buf.remove(2);
-    /// assert_eq!(Some(&15), buf.get(2));
+    /// buf.push_back(1);
+    /// buf.push_back(2);
+    /// buf.push_back(3);
+    ///
+    /// assert_eq!(buf.remove(1), Some(2));
+    /// assert_eq!(buf.get(1), Some(&3));
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn remove(&mut self, index: usize) -> Option<T> {
@@ -1156,121 +1429,133 @@ impl<T> VecDeque<T> {
 
         let idx = self.wrap_add(self.tail, index);
 
-        let elem = unsafe {
-            Some(self.buffer_read(idx))
-        };
+        let elem = unsafe { Some(self.buffer_read(idx)) };
 
         let distance_to_tail = index;
         let distance_to_head = self.len() - index;
 
         let contiguous = self.is_contiguous();
 
-        match (contiguous, distance_to_tail <= distance_to_head, idx >= self.tail) {
-            (true, true, _) => unsafe {
-                // contiguous, remove closer to tail:
-                //
-                //             T   R         H
-                //      [. . . o o x o o o o . . . . . .]
-                //
-                //               T           H
-                //      [. . . . o o o o o o . . . . . .]
-                //               M M
+        match (contiguous,
+               distance_to_tail <= distance_to_head,
+               idx >= self.tail) {
+            (true, true, _) => {
+                unsafe {
+                    // contiguous, remove closer to tail:
+                    //
+                    //             T   R         H
+                    //      [. . . o o x o o o o . . . . . .]
+                    //
+                    //               T           H
+                    //      [. . . . o o o o o o . . . . . .]
+                    //               M M
 
-                self.copy(self.tail + 1, self.tail, index);
-                self.tail += 1;
-            },
-            (true, false, _) => unsafe {
-                // contiguous, remove closer to head:
-                //
-                //             T       R     H
-                //      [. . . o o o o x o o . . . . . .]
-                //
-                //             T           H
-                //      [. . . o o o o o o . . . . . . .]
-                //                     M M
-
-                self.copy(idx, idx + 1, self.head - idx - 1);
-                self.head -= 1;
-            },
-            (false, true, true) => unsafe {
-                // discontiguous, remove closer to tail, tail section:
-                //
-                //                   H         T   R
-                //      [o o o o o o . . . . . o o x o o]
-                //
-                //                   H           T
-                //      [o o o o o o . . . . . . o o o o]
-                //                               M M
-
-                self.copy(self.tail + 1, self.tail, index);
-                self.tail = self.wrap_add(self.tail, 1);
-            },
-            (false, false, false) => unsafe {
-                // discontiguous, remove closer to head, head section:
-                //
-                //               R     H           T
-                //      [o o o o x o o . . . . . . o o o]
-                //
-                //                   H             T
-                //      [o o o o o o . . . . . . . o o o]
-                //               M M
-
-                self.copy(idx, idx + 1, self.head - idx - 1);
-                self.head -= 1;
-            },
-            (false, false, true) => unsafe {
-                // discontiguous, remove closer to head, tail section:
-                //
-                //             H           T         R
-                //      [o o o . . . . . . o o o o o x o]
-                //
-                //           H             T
-                //      [o o . . . . . . . o o o o o o o]
-                //       M M                         M M
-                //
-                // or quasi-discontiguous, remove next to head, tail section:
-                //
-                //       H                 T         R
-                //      [. . . . . . . . . o o o o o x o]
-                //
-                //                         T           H
-                //      [. . . . . . . . . o o o o o o .]
-                //                                   M
-
-                // draw in elements in the tail section
-                self.copy(idx, idx + 1, self.cap() - idx - 1);
-
-                // Prevents underflow.
-                if self.head != 0 {
-                    // copy first element into empty spot
-                    self.copy(self.cap() - 1, 0, 1);
-
-                    // move elements in the head section backwards
-                    self.copy(0, 1, self.head - 1);
+                    self.copy(self.tail + 1, self.tail, index);
+                    self.tail += 1;
                 }
+            }
+            (true, false, _) => {
+                unsafe {
+                    // contiguous, remove closer to head:
+                    //
+                    //             T       R     H
+                    //      [. . . o o o o x o o . . . . . .]
+                    //
+                    //             T           H
+                    //      [. . . o o o o o o . . . . . . .]
+                    //                     M M
 
-                self.head = self.wrap_sub(self.head, 1);
-            },
-            (false, true, false) => unsafe {
-                // discontiguous, remove closer to tail, head section:
-                //
-                //           R               H     T
-                //      [o o x o o o o o o o . . . o o o]
-                //
-                //                           H       T
-                //      [o o o o o o o o o o . . . . o o]
-                //       M M M                       M M
+                    self.copy(idx, idx + 1, self.head - idx - 1);
+                    self.head -= 1;
+                }
+            }
+            (false, true, true) => {
+                unsafe {
+                    // discontiguous, remove closer to tail, tail section:
+                    //
+                    //                   H         T   R
+                    //      [o o o o o o . . . . . o o x o o]
+                    //
+                    //                   H           T
+                    //      [o o o o o o . . . . . . o o o o]
+                    //                               M M
 
-                // draw in elements up to idx
-                self.copy(1, 0, idx);
+                    self.copy(self.tail + 1, self.tail, index);
+                    self.tail = self.wrap_add(self.tail, 1);
+                }
+            }
+            (false, false, false) => {
+                unsafe {
+                    // discontiguous, remove closer to head, head section:
+                    //
+                    //               R     H           T
+                    //      [o o o o x o o . . . . . . o o o]
+                    //
+                    //                   H             T
+                    //      [o o o o o o . . . . . . . o o o]
+                    //               M M
 
-                // copy last element into empty spot
-                self.copy(0, self.cap() - 1, 1);
+                    self.copy(idx, idx + 1, self.head - idx - 1);
+                    self.head -= 1;
+                }
+            }
+            (false, false, true) => {
+                unsafe {
+                    // discontiguous, remove closer to head, tail section:
+                    //
+                    //             H           T         R
+                    //      [o o o . . . . . . o o o o o x o]
+                    //
+                    //           H             T
+                    //      [o o . . . . . . . o o o o o o o]
+                    //       M M                         M M
+                    //
+                    // or quasi-discontiguous, remove next to head, tail section:
+                    //
+                    //       H                 T         R
+                    //      [. . . . . . . . . o o o o o x o]
+                    //
+                    //                         T           H
+                    //      [. . . . . . . . . o o o o o o .]
+                    //                                   M
 
-                // move elements from tail to end forward, excluding the last one
-                self.copy(self.tail + 1, self.tail, self.cap() - self.tail - 1);
+                    // draw in elements in the tail section
+                    self.copy(idx, idx + 1, self.cap() - idx - 1);
 
-                self.tail = self.wrap_add(self.tail, 1);
+                    // Prevents underflow.
+                    if self.head != 0 {
+                        // copy first element into empty spot
+                        self.copy(self.cap() - 1, 0, 1);
+
+                        // move elements in the head section backwards
+                        self.copy(0, 1, self.head - 1);
+                    }
+
+                    self.head = self.wrap_sub(self.head, 1);
+                }
+            }
+            (false, true, false) => {
+                unsafe {
+                    // discontiguous, remove closer to tail, head section:
+                    //
+                    //           R               H     T
+                    //      [o o x o o o o o o o . . . o o o]
+                    //
+                    //                           H       T
+                    //      [o o o o o o o o o o . . . . o o]
+                    //       M M M                       M M
+
+                    // draw in elements up to idx
+                    self.copy(1, 0, idx);
+
+                    // copy last element into empty spot
+                    self.copy(0, self.cap() - 1, 1);
+
+                    // move elements from tail to end forward, excluding the last one
+                    self.copy(self.tail + 1, self.tail, self.cap() - self.tail - 1);
+
+                    self.tail = self.wrap_add(self.tail, 1);
+                }
             }
         }
 
@@ -1291,7 +1576,6 @@ impl<T> VecDeque<T> {
     /// # Examples
     ///
     /// ```
-    /// # #![feature(split_off)]
     /// use std::collections::VecDeque;
     ///
     /// let mut buf: VecDeque<_> = vec![1,2,3].into_iter().collect();
@@ -1301,8 +1585,7 @@ impl<T> VecDeque<T> {
     /// assert_eq!(buf2.len(), 2);
     /// ```
     #[inline]
-    #[unstable(feature = "split_off",
-               reason = "new API, waiting for dust to settle")]
+    #[stable(feature = "split_off", since = "1.4.0")]
     pub fn split_off(&mut self, at: usize) -> Self {
         let len = self.len();
         assert!(at <= len, "`at` out of bounds");
@@ -1354,7 +1637,6 @@ impl<T> VecDeque<T> {
     /// # Examples
     ///
     /// ```
-    /// # #![feature(append)]
     /// use std::collections::VecDeque;
     ///
     /// let mut buf: VecDeque<_> = vec![1, 2, 3].into_iter().collect();
@@ -1364,11 +1646,10 @@ impl<T> VecDeque<T> {
     /// assert_eq!(buf2.len(), 0);
     /// ```
     #[inline]
-    #[unstable(feature = "append",
-               reason = "new API, waiting for dust to settle")]
+    #[stable(feature = "append", since = "1.4.0")]
     pub fn append(&mut self, other: &mut Self) {
         // naive impl
-        self.extend(other.drain());
+        self.extend(other.drain(..));
     }
 
     /// Retains only the elements specified by the predicate.
@@ -1380,7 +1661,6 @@ impl<T> VecDeque<T> {
     /// # Examples
     ///
     /// ```
-    /// # #![feature(vec_deque_retain)]
     /// use std::collections::VecDeque;
     ///
     /// let mut buf = VecDeque::new();
@@ -1390,16 +1670,17 @@ impl<T> VecDeque<T> {
     /// let v: Vec<_> = buf.into_iter().collect();
     /// assert_eq!(&v[..], &[2, 4]);
     /// ```
-    #[unstable(feature = "vec_deque_retain",
-               reason = "new API, waiting for dust to settle")]
-    pub fn retain<F>(&mut self, mut f: F) where F: FnMut(&T) -> bool {
+    #[stable(feature = "vec_deque_retain", since = "1.4.0")]
+    pub fn retain<F>(&mut self, mut f: F)
+        where F: FnMut(&T) -> bool
+    {
         let len = self.len();
         let mut del = 0;
         for i in 0..len {
             if !f(&self[i]) {
                 del += 1;
             } else if del > 0 {
-                self.swap(i-del, i);
+                self.swap(i - del, i);
             }
         }
         if del > 0 {
@@ -1415,7 +1696,8 @@ impl<T: Clone> VecDeque<T> {
     /// # Examples
     ///
     /// ```
-    /// # #![feature(deque_extras)]
+    /// #![feature(deque_extras)]
+    ///
     /// use std::collections::VecDeque;
     ///
     /// let mut buf = VecDeque::new();
@@ -1429,7 +1711,8 @@ impl<T: Clone> VecDeque<T> {
     /// }
     /// ```
     #[unstable(feature = "deque_extras",
-               reason = "matches collection reform specification; waiting on panic semantics")]
+               reason = "matches collection reform specification; waiting on panic semantics",
+               issue = "27788")]
     pub fn resize(&mut self, new_len: usize, value: T) {
         let len = self.len();
 
@@ -1445,6 +1728,7 @@ impl<T: Clone> VecDeque<T> {
 #[inline]
 fn wrap_index(index: usize, size: usize) -> usize {
     // size is always a power of 2
+    debug_assert!(size.is_power_of_two());
     index & (size - 1)
 }
 
@@ -1457,19 +1741,20 @@ fn count(tail: usize, head: usize, size: usize) -> usize {
 
 /// `VecDeque` iterator.
 #[stable(feature = "rust1", since = "1.0.0")]
-pub struct Iter<'a, T:'a> {
+pub struct Iter<'a, T: 'a> {
     ring: &'a [T],
     tail: usize,
-    head: usize
+    head: usize,
 }
 
 // FIXME(#19839) Remove in favor of `#[derive(Clone)]`
+#[stable(feature = "rust1", since = "1.0.0")]
 impl<'a, T> Clone for Iter<'a, T> {
     fn clone(&self) -> Iter<'a, T> {
         Iter {
             ring: self.ring,
             tail: self.tail,
-            head: self.head
+            head: self.head,
         }
     }
 }
@@ -1510,29 +1795,9 @@ impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<'a, T> ExactSizeIterator for Iter<'a, T> {}
 
-#[stable(feature = "rust1", since = "1.0.0")]
-#[allow(deprecated)]
-impl<'a, T> RandomAccessIterator for Iter<'a, T> {
-    #[inline]
-    fn indexable(&self) -> usize {
-        let (len, _) = self.size_hint();
-        len
-    }
-
-    #[inline]
-    fn idx(&mut self, j: usize) -> Option<&'a T> {
-        if j >= self.indexable() {
-            None
-        } else {
-            let idx = wrap_index(self.tail.wrapping_add(j), self.ring.len());
-            unsafe { Some(self.ring.get_unchecked(idx)) }
-        }
-    }
-}
-
 /// `VecDeque` mutable iterator.
 #[stable(feature = "rust1", since = "1.0.0")]
-pub struct IterMut<'a, T:'a> {
+pub struct IterMut<'a, T: 'a> {
     ring: &'a mut [T],
     tail: usize,
     head: usize,
@@ -1617,18 +1882,65 @@ impl<T> DoubleEndedIterator for IntoIter<T> {
 impl<T> ExactSizeIterator for IntoIter<T> {}
 
 /// A draining VecDeque iterator
-#[unstable(feature = "drain",
-           reason = "matches collection reform specification, waiting for dust to settle")]
+#[stable(feature = "drain", since = "1.6.0")]
 pub struct Drain<'a, T: 'a> {
-    inner: &'a mut VecDeque<T>,
+    after_tail: usize,
+    after_head: usize,
+    iter: Iter<'a, T>,
+    deque: *mut VecDeque<T>,
 }
+
+#[stable(feature = "drain", since = "1.6.0")]
+unsafe impl<'a, T: Sync> Sync for Drain<'a, T> {}
+#[stable(feature = "drain", since = "1.6.0")]
+unsafe impl<'a, T: Send> Send for Drain<'a, T> {}
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<'a, T: 'a> Drop for Drain<'a, T> {
     fn drop(&mut self) {
         for _ in self.by_ref() {}
-        self.inner.head = 0;
-        self.inner.tail = 0;
+
+        let source_deque = unsafe { &mut *self.deque };
+
+        // T = source_deque_tail; H = source_deque_head; t = drain_tail; h = drain_head
+        //
+        //        T   t   h   H
+        // [. . . o o x x o o . . .]
+        //
+        let orig_tail = source_deque.tail;
+        let drain_tail = source_deque.head;
+        let drain_head = self.after_tail;
+        let orig_head = self.after_head;
+
+        let tail_len = count(orig_tail, drain_tail, source_deque.cap());
+        let head_len = count(drain_head, orig_head, source_deque.cap());
+
+        // Restore the original head value
+        source_deque.head = orig_head;
+
+        match (tail_len, head_len) {
+            (0, 0) => {
+                source_deque.head = 0;
+                source_deque.tail = 0;
+            }
+            (0, _) => {
+                source_deque.tail = drain_head;
+            }
+            (_, 0) => {
+                source_deque.head = drain_tail;
+            }
+            _ => {
+                unsafe {
+                    if tail_len <= head_len {
+                        source_deque.tail = source_deque.wrap_sub(drain_head, tail_len);
+                        source_deque.wrap_copy(source_deque.tail, orig_tail, tail_len);
+                    } else {
+                        source_deque.head = source_deque.wrap_add(drain_tail, head_len);
+                        source_deque.wrap_copy(drain_tail, drain_head, head_len);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1638,13 +1950,12 @@ impl<'a, T: 'a> Iterator for Drain<'a, T> {
 
     #[inline]
     fn next(&mut self) -> Option<T> {
-        self.inner.pop_front()
+        self.iter.next().map(|elt| unsafe { ptr::read(elt) })
     }
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let len = self.inner.len();
-        (len, Some(len))
+        self.iter.size_hint()
     }
 }
 
@@ -1652,7 +1963,7 @@ impl<'a, T: 'a> Iterator for Drain<'a, T> {
 impl<'a, T: 'a> DoubleEndedIterator for Drain<'a, T> {
     #[inline]
     fn next_back(&mut self) -> Option<T> {
-        self.inner.pop_back()
+        self.iter.next_back().map(|elt| unsafe { ptr::read(elt) })
     }
 }
 
@@ -1662,8 +1973,39 @@ impl<'a, T: 'a> ExactSizeIterator for Drain<'a, T> {}
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<A: PartialEq> PartialEq for VecDeque<A> {
     fn eq(&self, other: &VecDeque<A>) -> bool {
-        self.len() == other.len() &&
-            self.iter().zip(other).all(|(a, b)| a.eq(b))
+        if self.len() != other.len() {
+            return false;
+        }
+        let (sa, sb) = self.as_slices();
+        let (oa, ob) = other.as_slices();
+        if sa.len() == oa.len() {
+            sa == oa && sb == ob
+        } else if sa.len() < oa.len() {
+            // Always divisible in three sections, for example:
+            // self:  [a b c|d e f]
+            // other: [0 1 2 3|4 5]
+            // front = 3, mid = 1,
+            // [a b c] == [0 1 2] && [d] == [3] && [e f] == [4 5]
+            let front = sa.len();
+            let mid = oa.len() - front;
+
+            let (oa_front, oa_mid) = oa.split_at(front);
+            let (sb_mid, sb_back) = sb.split_at(mid);
+            debug_assert_eq!(sa.len(), oa_front.len());
+            debug_assert_eq!(sb_mid.len(), oa_mid.len());
+            debug_assert_eq!(sb_back.len(), ob.len());
+            sa == oa_front && sb_mid == oa_mid && sb_back == ob
+        } else {
+            let front = oa.len();
+            let mid = sa.len() - front;
+
+            let (sa_front, sa_mid) = sa.split_at(front);
+            let (ob_mid, ob_back) = ob.split_at(mid);
+            debug_assert_eq!(sa_front.len(), oa.len());
+            debug_assert_eq!(sa_mid.len(), ob_mid.len());
+            debug_assert_eq!(sb.len(), ob_back.len());
+            sa_front == oa && sa_mid == ob_mid && sb == ob_back
+        }
     }
 }
 
@@ -1673,7 +2015,7 @@ impl<A: Eq> Eq for VecDeque<A> {}
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<A: PartialOrd> PartialOrd for VecDeque<A> {
     fn partial_cmp(&self, other: &VecDeque<A>) -> Option<Ordering> {
-        iter::order::partial_cmp(self.iter(), other.iter())
+        self.iter().partial_cmp(other.iter())
     }
 }
 
@@ -1681,7 +2023,7 @@ impl<A: PartialOrd> PartialOrd for VecDeque<A> {
 impl<A: Ord> Ord for VecDeque<A> {
     #[inline]
     fn cmp(&self, other: &VecDeque<A>) -> Ordering {
-        iter::order::cmp(self.iter(), other.iter())
+        self.iter().cmp(other.iter())
     }
 }
 
@@ -1689,9 +2031,9 @@ impl<A: Ord> Ord for VecDeque<A> {
 impl<A: Hash> Hash for VecDeque<A> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.len().hash(state);
-        for elt in self {
-            elt.hash(state);
-        }
+        let (a, b) = self.as_slices();
+        Hash::hash_slice(a, state);
+        Hash::hash_slice(b, state);
     }
 }
 
@@ -1715,8 +2057,8 @@ impl<A> IndexMut<usize> for VecDeque<A> {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<A> FromIterator<A> for VecDeque<A> {
-    fn from_iter<T: IntoIterator<Item=A>>(iterable: T) -> VecDeque<A> {
-        let iterator = iterable.into_iter();
+    fn from_iter<T: IntoIterator<Item = A>>(iter: T) -> VecDeque<A> {
+        let iterator = iter.into_iter();
         let (lower, _) = iterator.size_hint();
         let mut deq = VecDeque::with_capacity(lower);
         deq.extend(iterator);
@@ -1732,9 +2074,7 @@ impl<T> IntoIterator for VecDeque<T> {
     /// Consumes the list into a front-to-back iterator yielding elements by
     /// value.
     fn into_iter(self) -> IntoIter<T> {
-        IntoIter {
-            inner: self,
-        }
+        IntoIter { inner: self }
     }
 }
 
@@ -1760,7 +2100,7 @@ impl<'a, T> IntoIterator for &'a mut VecDeque<T> {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<A> Extend<A> for VecDeque<A> {
-    fn extend<T: IntoIterator<Item=A>>(&mut self, iter: T) {
+    fn extend<T: IntoIterator<Item = A>>(&mut self, iter: T) {
         for elt in iter {
             self.push_back(elt);
         }
@@ -1769,7 +2109,7 @@ impl<A> Extend<A> for VecDeque<A> {
 
 #[stable(feature = "extend_ref", since = "1.2.0")]
 impl<'a, T: 'a + Copy> Extend<&'a T> for VecDeque<T> {
-    fn extend<I: IntoIterator<Item=&'a T>>(&mut self, iter: I) {
+    fn extend<I: IntoIterator<Item = &'a T>>(&mut self, iter: I) {
         self.extend(iter.into_iter().cloned());
     }
 }
@@ -1777,14 +2117,7 @@ impl<'a, T: 'a + Copy> Extend<&'a T> for VecDeque<T> {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T: fmt::Debug> fmt::Debug for VecDeque<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        try!(write!(f, "["));
-
-        for (i, e) in self.iter().enumerate() {
-            if i != 0 { try!(write!(f, ", ")); }
-            try!(write!(f, "{:?}", *e));
-        }
-
-        write!(f, "]")
+        f.debug_list().entries(self).finish()
     }
 }
 
@@ -1823,7 +2156,7 @@ mod tests {
 
     #[bench]
     fn bench_pop_back_100(b: &mut test::Bencher) {
-        let mut deq= VecDeque::<i32>::with_capacity(101);
+        let mut deq = VecDeque::<i32>::with_capacity(101);
 
         b.iter(|| {
             deq.head = 100;
@@ -1870,7 +2203,7 @@ mod tests {
                             tester.push_front(i);
                         }
                         for i in 0..len {
-                            assert_eq!(tester.swap_back_remove(i), Some(len * 2 - 1 - i));
+                            assert_eq!(tester.swap_remove_back(i), Some(len * 2 - 1 - i));
                         }
                     } else {
                         for i in 0..len * 2 {
@@ -1878,7 +2211,7 @@ mod tests {
                         }
                         for i in 0..len {
                             let idx = tester.len() - 1 - i;
-                            assert_eq!(tester.swap_front_remove(idx), Some(len * 2 - 1 - i));
+                            assert_eq!(tester.swap_remove_front(idx), Some(len * 2 - 1 - i));
                         }
                     }
                     assert!(tester.tail < tester.cap());
@@ -1957,6 +2290,43 @@ mod tests {
                     assert!(tester.tail < tester.cap());
                     assert!(tester.head < tester.cap());
                     assert_eq!(tester, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_drain() {
+        let mut tester: VecDeque<usize> = VecDeque::with_capacity(7);
+
+        let cap = tester.capacity();
+        for len in 0..cap + 1 {
+            for tail in 0..cap + 1 {
+                for drain_start in 0..len + 1 {
+                    for drain_end in drain_start..len + 1 {
+                        tester.tail = tail;
+                        tester.head = tail;
+                        for i in 0..len {
+                            tester.push_back(i);
+                        }
+
+                        // Check that we drain the correct values
+                        let drained: VecDeque<_> = tester.drain(drain_start..drain_end).collect();
+                        let drained_expected: VecDeque<_> = (drain_start..drain_end).collect();
+                        assert_eq!(drained, drained_expected);
+
+                        // We shouldn't have changed the capacity or made the
+                        // head or tail out of bounds
+                        assert_eq!(tester.capacity(), cap);
+                        assert!(tester.tail < tester.cap());
+                        assert!(tester.head < tester.cap());
+
+                        // We should see the correct values in the VecDeque
+                        let expected: VecDeque<_> = (0..drain_start)
+                                                        .chain(drain_end..len)
+                                                        .collect();
+                        assert_eq!(expected, tester);
+                    }
                 }
             }
         }

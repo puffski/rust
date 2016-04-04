@@ -13,19 +13,17 @@
 use super::{check_fn, Expectation, FnCtxt};
 
 use astconv;
-use middle::region;
-use middle::subst;
-use middle::ty::{self, ToPolyTraitRef, Ty};
+use rustc::ty::subst;
+use rustc::ty::{self, ToPolyTraitRef, Ty};
 use std::cmp;
-use syntax::abi;
-use syntax::ast;
-use syntax::ast_util;
+use syntax::abi::Abi;
+use rustc_front::hir;
 
 pub fn check_expr_closure<'a,'tcx>(fcx: &FnCtxt<'a,'tcx>,
-                                   expr: &ast::Expr,
-                                   _capture: ast::CaptureClause,
-                                   decl: &'tcx ast::FnDecl,
-                                   body: &'tcx ast::Block,
+                                   expr: &hir::Expr,
+                                   _capture: hir::CaptureClause,
+                                   decl: &'tcx hir::FnDecl,
+                                   body: &'tcx hir::Block,
                                    expected: Expectation<'tcx>) {
     debug!("check_expr_closure(expr={:?},expected={:?})",
            expr,
@@ -42,21 +40,21 @@ pub fn check_expr_closure<'a,'tcx>(fcx: &FnCtxt<'a,'tcx>,
 }
 
 fn check_closure<'a,'tcx>(fcx: &FnCtxt<'a,'tcx>,
-                          expr: &ast::Expr,
+                          expr: &hir::Expr,
                           opt_kind: Option<ty::ClosureKind>,
-                          decl: &'tcx ast::FnDecl,
-                          body: &'tcx ast::Block,
+                          decl: &'tcx hir::FnDecl,
+                          body: &'tcx hir::Block,
                           expected_sig: Option<ty::FnSig<'tcx>>) {
-    let expr_def_id = ast_util::local_def(expr.id);
+    let expr_def_id = fcx.tcx().map.local_def_id(expr.id);
 
     debug!("check_closure opt_kind={:?} expected_sig={:?}",
            opt_kind,
            expected_sig);
 
     let mut fn_ty = astconv::ty_of_closure(fcx,
-                                           ast::Unsafety::Normal,
+                                           hir::Unsafety::Normal,
                                            decl,
-                                           abi::RustCall,
+                                           Abi::RustCall,
                                            expected_sig);
 
     // Create type variables (for now) to represent the transformed
@@ -77,15 +75,15 @@ fn check_closure<'a,'tcx>(fcx: &FnCtxt<'a,'tcx>,
     fcx.write_ty(expr.id, closure_type);
 
     let fn_sig = fcx.tcx().liberate_late_bound_regions(
-        region::DestructionScopeData::new(body.id), &fn_ty.sig);
+        fcx.tcx().region_maps.call_site_extent(expr.id, body.id), &fn_ty.sig);
 
     check_fn(fcx.ccx,
-             ast::Unsafety::Normal,
+             hir::Unsafety::Normal,
              expr.id,
              &fn_sig,
              decl,
              expr.id,
-             &*body,
+             &body,
              fcx.inh);
 
     // Tuple up the arguments and insert the resulting function type into
@@ -136,13 +134,14 @@ fn deduce_expectations_from_obligations<'a,'tcx>(
     expected_vid: ty::TyVid)
     -> (Option<ty::FnSig<'tcx>>, Option<ty::ClosureKind>)
 {
-    let fulfillment_cx = fcx.inh.infcx.fulfillment_cx.borrow();
+    let fulfillment_cx = fcx.inh.fulfillment_cx.borrow();
     // Here `expected_ty` is known to be a type inference variable.
 
     let expected_sig =
         fulfillment_cx
         .pending_obligations()
         .iter()
+        .map(|obligation| &obligation.obligation)
         .filter_map(|obligation| {
             debug!("deduce_expectations_from_obligations: obligation.predicate={:?}",
                    obligation.predicate);
@@ -170,6 +169,7 @@ fn deduce_expectations_from_obligations<'a,'tcx>(
         fulfillment_cx
         .pending_obligations()
         .iter()
+        .map(|obligation| &obligation.obligation)
         .filter_map(|obligation| {
             let opt_trait_ref = match obligation.predicate {
                 ty::Predicate::Projection(ref data) => Some(data.to_poly_trait_ref()),
@@ -177,6 +177,8 @@ fn deduce_expectations_from_obligations<'a,'tcx>(
                 ty::Predicate::Equate(..) => None,
                 ty::Predicate::RegionOutlives(..) => None,
                 ty::Predicate::TypeOutlives(..) => None,
+                ty::Predicate::WellFormed(..) => None,
+                ty::Predicate::ObjectSafe(..) => None,
             };
             opt_trait_ref
                 .and_then(|trait_ref| self_type_matches_expected_vid(fcx, trait_ref, expected_vid))

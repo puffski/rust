@@ -15,16 +15,23 @@ use CrateCtxt;
 
 use astconv::AstConv;
 use check::{self, FnCtxt};
-use middle::ty::{self, Ty, ToPolyTraitRef, ToPredicate, HasTypeFlags};
-use middle::def;
+use front::map as hir_map;
+use rustc::ty::{self, Ty, ToPolyTraitRef, ToPredicate, TypeFoldable};
+use middle::cstore::{self, CrateStore};
+use middle::def::Def;
+use middle::def_id::DefId;
 use middle::lang_items::FnOnceTraitLangItem;
-use middle::subst::Substs;
-use middle::traits::{Obligation, SelectionContext};
-use metadata::{csearch, cstore, decoder};
+use rustc::ty::subst::Substs;
+use rustc::traits::{Obligation, SelectionContext};
+use util::nodemap::{FnvHashSet};
 
-use syntax::{ast, ast_util};
+
+use syntax::ast;
 use syntax::codemap::Span;
-use syntax::print::pprust;
+use syntax::errors::DiagnosticBuilder;
+use rustc_front::print::pprust;
+use rustc_front::hir;
+use rustc_front::hir::Expr_;
 
 use std::cell;
 use std::cmp::Ordering;
@@ -32,11 +39,46 @@ use std::cmp::Ordering;
 use super::{MethodError, NoMatchData, CandidateSource, impl_item, trait_item};
 use super::probe::Mode;
 
+fn is_fn_ty<'a, 'tcx>(ty: &Ty<'tcx>, fcx: &FnCtxt<'a, 'tcx>, span: Span) -> bool {
+    let cx = fcx.tcx();
+    match ty.sty {
+        // Not all of these (e.g. unsafe fns) implement FnOnce
+        // so we look for these beforehand
+        ty::TyClosure(..) | ty::TyFnDef(..) | ty::TyFnPtr(_) => true,
+        // If it's not a simple function, look for things which implement FnOnce
+        _ => {
+            if let Ok(fn_once_trait_did) =
+                    cx.lang_items.require(FnOnceTraitLangItem) {
+                let infcx = fcx.infcx();
+                infcx.probe(|_| {
+                    let fn_once_substs =
+                        Substs::new_trait(vec![infcx.next_ty_var()],
+                                          Vec::new(),
+                                          ty);
+                    let trait_ref =
+                      ty::TraitRef::new(fn_once_trait_did,
+                                        cx.mk_substs(fn_once_substs));
+                    let poly_trait_ref = trait_ref.to_poly_trait_ref();
+                    let obligation = Obligation::misc(span,
+                                                      fcx.body_id,
+                                                      poly_trait_ref
+                                                         .to_predicate());
+                    let mut selcx = SelectionContext::new(infcx);
+
+                    return selcx.evaluate_obligation(&obligation)
+                })
+            } else {
+                false
+            }
+        }
+    }
+}
+
 pub fn report_error<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
                               span: Span,
                               rcvr_ty: Ty<'tcx>,
                               item_name: ast::Name,
-                              rcvr_expr: Option<&ast::Expr>,
+                              rcvr_expr: Option<&hir::Expr>,
                               error: MethodError<'tcx>)
 {
     // avoid suggestions when we don't know what's going on.
@@ -48,10 +90,10 @@ pub fn report_error<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
         MethodError::NoMatch(NoMatchData { static_candidates: static_sources,
                                            unsatisfied_predicates,
                                            out_of_scope_traits,
-                                           mode }) => {
+                                           mode, .. }) => {
             let cx = fcx.tcx();
 
-            fcx.type_error_message(
+            let mut err = fcx.type_error_struct(
                 span,
                 |actual| {
                     format!("no {} named `{}` found for type `{}` \
@@ -65,10 +107,8 @@ pub fn report_error<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
                 None);
 
             // If the item has the name of a field, give a help note
-            if let (&ty::TyStruct(did, substs), Some(expr)) = (&rcvr_ty.sty, rcvr_expr) {
-                let fields = cx.lookup_struct_fields(did);
-
-                if let Some(field) = fields.iter().find(|f| f.name == item_name) {
+            if let (&ty::TyStruct(def, substs), Some(expr)) = (&rcvr_ty.sty, rcvr_expr) {
+                if let Some(field) = def.struct_variant().find_field_named(item_name) {
                     let expr_string = match cx.sess.codemap().span_to_snippet(expr.span) {
                         Ok(expr_string) => expr_string,
                         _ => "s".into() // Default to a generic placeholder for the
@@ -76,56 +116,53 @@ pub fn report_error<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
                                         // snippet
                     };
 
-                    let span_stored_function = || {
-                        cx.sess.span_note(span,
-                                          &format!("use `({0}.{1})(...)` if you meant to call \
-                                                    the function stored in the `{1}` field",
-                                                   expr_string, item_name));
-                    };
+                    let field_ty = field.ty(cx, substs);
 
-                    let span_did_you_mean = || {
-                        cx.sess.span_note(span, &format!("did you mean to write `{0}.{1}`?",
-                                                         expr_string, item_name));
-                    };
-
-                    // Determine if the field can be used as a function in some way
-                    let field_ty = cx.lookup_field_type(did, field.id, substs);
-                    if let Ok(fn_once_trait_did) = cx.lang_items.require(FnOnceTraitLangItem) {
-                        let infcx = fcx.infcx();
-                        infcx.probe(|_| {
-                            let fn_once_substs = Substs::new_trait(vec![infcx.next_ty_var()],
-                                                                   Vec::new(),
-                                                                   field_ty);
-                            let trait_ref = ty::TraitRef::new(fn_once_trait_did,
-                                                              cx.mk_substs(fn_once_substs));
-                            let poly_trait_ref = trait_ref.to_poly_trait_ref();
-                            let obligation = Obligation::misc(span,
-                                                              fcx.body_id,
-                                                              poly_trait_ref.to_predicate());
-                            let mut selcx = SelectionContext::new(infcx);
-
-                            if selcx.evaluate_obligation(&obligation) {
-                                span_stored_function();
-                            } else {
-                                span_did_you_mean();
-                            }
-                        });
+                    if is_fn_ty(&field_ty, &fcx, span) {
+                        err.span_note(span,
+                                      &format!("use `({0}.{1})(...)` if you meant to call \
+                                               the function stored in the `{1}` field",
+                                               expr_string, item_name));
                     } else {
-                        match field_ty.sty {
-                            // fallback to matching a closure or function pointer
-                            ty::TyClosure(..) | ty::TyBareFn(..) => span_stored_function(),
-                            _ => span_did_you_mean(),
+                        err.span_note(span, &format!("did you mean to write `{0}.{1}`?",
+                                                     expr_string, item_name));
+                    }
+                }
+            }
+
+            if is_fn_ty(&rcvr_ty, &fcx, span) {
+                macro_rules! report_function {
+                    ($span:expr, $name:expr) => {
+                        err.fileline_note(
+                            $span,
+                            &format!("{} is a function, perhaps you wish to call it",
+                                     $name));
+                    }
+                }
+
+                if let Some(expr) = rcvr_expr {
+                    if let Ok (expr_string) = cx.sess.codemap().span_to_snippet(expr.span) {
+                        report_function!(expr.span, expr_string);
+                        err.span_suggestion(expr.span,
+                                            "try calling the base function:",
+                                            format!("{}()",
+                                                    expr_string));
+                    }
+                    else if let Expr_::ExprPath(_, path) = expr.node.clone() {
+                        if let Some(segment) = path.segments.last() {
+                            report_function!(expr.span, segment.identifier.name);
                         }
                     }
                 }
             }
 
             if !static_sources.is_empty() {
-                cx.sess.fileline_note(
+                err.fileline_note(
                     span,
-                    "found defined static methods, maybe a `self` is missing?");
+                    "found the following associated functions; to be used as \
+                     methods, functions must have a `self` parameter");
 
-                report_candidates(fcx, span, item_name, static_sources);
+                report_candidates(fcx, &mut err, span, item_name, static_sources);
             }
 
             if !unsatisfied_predicates.is_empty() {
@@ -135,7 +172,7 @@ pub fn report_error<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
                                      p))
                     .collect::<Vec<_>>()
                     .join(", ");
-                cx.sess.fileline_note(
+                err.fileline_note(
                     span,
                     &format!("the method `{}` exists but the \
                              following trait bounds were not satisfied: {}",
@@ -143,15 +180,17 @@ pub fn report_error<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
                              bound_list));
             }
 
-            suggest_traits_to_import(fcx, span, rcvr_ty, item_name,
-                                     rcvr_expr, out_of_scope_traits)
+            suggest_traits_to_import(fcx, &mut err, span, rcvr_ty, item_name,
+                                     rcvr_expr, out_of_scope_traits);
+            err.emit();
         }
 
         MethodError::Ambiguity(sources) => {
-            span_err!(fcx.sess(), span, E0034,
-                      "multiple applicable items in scope");
+            let mut err = struct_span_err!(fcx.sess(), span, E0034,
+                                           "multiple applicable items in scope");
 
-            report_candidates(fcx, span, item_name, sources);
+            report_candidates(fcx, &mut err, span, item_name, sources);
+            err.emit();
         }
 
         MethodError::ClosureAmbiguity(trait_def_id) => {
@@ -168,9 +207,15 @@ pub fn report_error<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
             };
             fcx.sess().span_err(span, &msg);
         }
+
+        MethodError::PrivateMatch(def) => {
+            let msg = format!("{} `{}` is private", def.kind_name(), item_name);
+            fcx.tcx().sess.span_err(span, &msg);
+        }
     }
 
     fn report_candidates(fcx: &FnCtxt,
+                         err: &mut DiagnosticBuilder,
                          span: Span,
                          item_name: ast::Name,
                          mut sources: Vec<CandidateSource>) {
@@ -182,7 +227,14 @@ pub fn report_error<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
                 CandidateSource::ImplSource(impl_did) => {
                     // Provide the best span we can. Use the item, if local to crate, else
                     // the impl, if local to crate (item may be defaulted), else the call site.
-                    let item = impl_item(fcx.tcx(), impl_did, item_name).unwrap();
+                    let item = impl_item(fcx.tcx(), impl_did, item_name)
+                        .or_else(|| {
+                            trait_item(
+                                fcx.tcx(),
+                                fcx.tcx().impl_trait_ref(impl_did).unwrap().def_id,
+                                item_name
+                            )
+                        }).unwrap();
                     let impl_span = fcx.tcx().map.def_id_span(impl_did, span);
                     let item_span = fcx.tcx().map.def_id_span(item.def_id(), impl_span);
 
@@ -196,7 +248,7 @@ pub fn report_error<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
                         }
                     };
 
-                    span_note!(fcx.sess(), item_span,
+                    span_note!(err, item_span,
                                "candidate #{} is defined in an impl{} for the type `{}`",
                                idx + 1,
                                insertion,
@@ -205,7 +257,7 @@ pub fn report_error<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
                 CandidateSource::TraitSource(trait_did) => {
                     let item = trait_item(fcx.tcx(), trait_did, item_name).unwrap();
                     let item_span = fcx.tcx().map.def_id_span(item.def_id(), span);
-                    span_note!(fcx.sess(), item_span,
+                    span_note!(err, item_span,
                                "candidate #{} is defined in the trait `{}`",
                                idx + 1,
                                fcx.tcx().item_path_str(trait_did));
@@ -219,11 +271,12 @@ pub fn report_error<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
 pub type AllTraitsVec = Vec<TraitInfo>;
 
 fn suggest_traits_to_import<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
+                                      err: &mut DiagnosticBuilder,
                                       span: Span,
                                       rcvr_ty: Ty<'tcx>,
                                       item_name: ast::Name,
-                                      rcvr_expr: Option<&ast::Expr>,
-                                      valid_out_of_scope_traits: Vec<ast::DefId>)
+                                      rcvr_expr: Option<&hir::Expr>,
+                                      valid_out_of_scope_traits: Vec<DefId>)
 {
     let tcx = fcx.tcx();
 
@@ -238,14 +291,13 @@ fn suggest_traits_to_import<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
             traits_are = if candidates.len() == 1 {"trait is"} else {"traits are"},
             one_of_them = if candidates.len() == 1 {"it"} else {"one of them"});
 
-        fcx.sess().fileline_help(span, &msg[..]);
+        err.fileline_help(span, &msg[..]);
 
         for (i, trait_did) in candidates.iter().enumerate() {
-            fcx.sess().fileline_help(span,
-                                     &*format!("candidate #{}: use `{}`",
-                                               i + 1,
-                                               fcx.tcx().item_path_str(*trait_did)))
-
+            err.fileline_help(span,
+                              &format!("candidate #{}: `use {}`",
+                                        i + 1,
+                                        fcx.tcx().item_path_str(*trait_did)));
         }
         return
     }
@@ -263,7 +315,7 @@ fn suggest_traits_to_import<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
             // this isn't perfect (that is, there are cases when
             // implementing a trait would be legal but is rejected
             // here).
-            (type_is_local || ast_util::is_local(info.def_id))
+            (type_is_local || info.def_id.is_local())
                 && trait_item(tcx, info.def_id, item_name).is_some()
         })
         .collect::<Vec<_>>();
@@ -284,13 +336,13 @@ fn suggest_traits_to_import<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
             one_of_them = if candidates.len() == 1 {"it"} else {"one of them"},
             name = item_name);
 
-        fcx.sess().fileline_help(span, &msg[..]);
+        err.fileline_help(span, &msg[..]);
 
         for (i, trait_info) in candidates.iter().enumerate() {
-            fcx.sess().fileline_help(span,
-                                     &*format!("candidate #{}: `{}`",
-                                               i + 1,
-                                               fcx.tcx().item_path_str(trait_info.def_id)))
+            err.fileline_help(span,
+                              &format!("candidate #{}: `{}`",
+                                        i + 1,
+                                        fcx.tcx().item_path_str(trait_info.def_id)));
         }
     }
 }
@@ -300,12 +352,12 @@ fn suggest_traits_to_import<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
 fn type_derefs_to_local<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
                                   span: Span,
                                   rcvr_ty: Ty<'tcx>,
-                                  rcvr_expr: Option<&ast::Expr>) -> bool {
+                                  rcvr_expr: Option<&hir::Expr>) -> bool {
     fn is_local(ty: Ty) -> bool {
         match ty.sty {
-            ty::TyEnum(did, _) | ty::TyStruct(did, _) => ast_util::is_local(did),
+            ty::TyEnum(def, _) | ty::TyStruct(def, _) => def.did.is_local(),
 
-            ty::TyTrait(ref tr) => ast_util::is_local(tr.principal_def_id()),
+            ty::TyTrait(ref tr) => tr.principal_def_id().is_local(),
 
             ty::TyParam(_) => true,
 
@@ -323,8 +375,8 @@ fn type_derefs_to_local<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
         return is_local(fcx.resolve_type_vars_if_possible(rcvr_ty));
     }
 
-    check::autoderef(fcx, span, rcvr_ty, None,
-                     check::UnresolvedTypeAction::Ignore, check::NoPreference,
+    check::autoderef(fcx, span, rcvr_ty, || None,
+                     check::UnresolvedTypeAction::Ignore, ty::NoPreference,
                      |ty, _| {
         if is_local(ty) {
             Some(())
@@ -336,11 +388,11 @@ fn type_derefs_to_local<'a, 'tcx>(fcx: &FnCtxt<'a, 'tcx>,
 
 #[derive(Copy, Clone)]
 pub struct TraitInfo {
-    pub def_id: ast::DefId,
+    pub def_id: DefId,
 }
 
 impl TraitInfo {
-    fn new(def_id: ast::DefId) -> TraitInfo {
+    fn new(def_id: DefId) -> TraitInfo {
         TraitInfo {
             def_id: def_id,
         }
@@ -357,13 +409,11 @@ impl PartialOrd for TraitInfo {
 }
 impl Ord for TraitInfo {
     fn cmp(&self, other: &TraitInfo) -> Ordering {
-        // accessible traits are more important/relevant than
-        // inaccessible ones, local crates are more important than
-        // remote ones (local: cnum == 0), and NodeIds just for
-        // totality.
+        // local crates are more important than remote ones (local:
+        // cnum == 0), and otherwise we throw in the defid for totality
 
-        let lhs = (other.def_id.krate, other.def_id.node);
-        let rhs = (self.def_id.krate, self.def_id.node);
+        let lhs = (other.def_id.krate, other.def_id);
+        let rhs = (self.def_id.krate, self.def_id);
         lhs.cmp(&rhs)
     }
 }
@@ -371,54 +421,64 @@ impl Ord for TraitInfo {
 /// Retrieve all traits in this crate and any dependent crates.
 pub fn all_traits<'a>(ccx: &'a CrateCtxt) -> AllTraits<'a> {
     if ccx.all_traits.borrow().is_none() {
-        use syntax::visit;
+        use rustc_front::intravisit;
 
         let mut traits = vec![];
 
         // Crate-local:
         //
         // meh.
-        struct Visitor<'a> {
+        struct Visitor<'a, 'tcx:'a> {
+            map: &'a hir_map::Map<'tcx>,
             traits: &'a mut AllTraitsVec,
         }
-        impl<'v, 'a> visit::Visitor<'v> for Visitor<'a> {
-            fn visit_item(&mut self, i: &'v ast::Item) {
+        impl<'v, 'a, 'tcx> intravisit::Visitor<'v> for Visitor<'a, 'tcx> {
+            fn visit_item(&mut self, i: &'v hir::Item) {
                 match i.node {
-                    ast::ItemTrait(..) => {
-                        self.traits.push(TraitInfo::new(ast_util::local_def(i.id)));
+                    hir::ItemTrait(..) => {
+                        let def_id = self.map.local_def_id(i.id);
+                        self.traits.push(TraitInfo::new(def_id));
                     }
                     _ => {}
                 }
-                visit::walk_item(self, i)
             }
         }
-        visit::walk_crate(&mut Visitor {
+        ccx.tcx.map.krate().visit_all_items(&mut Visitor {
+            map: &ccx.tcx.map,
             traits: &mut traits
-        }, ccx.tcx.map.krate());
+        });
 
         // Cross-crate:
+        let mut external_mods = FnvHashSet();
         fn handle_external_def(traits: &mut AllTraitsVec,
+                               external_mods: &mut FnvHashSet<DefId>,
                                ccx: &CrateCtxt,
-                               cstore: &cstore::CStore,
-                               dl: decoder::DefLike) {
+                               cstore: &for<'a> cstore::CrateStore<'a>,
+                               dl: cstore::DefLike) {
             match dl {
-                decoder::DlDef(def::DefTrait(did)) => {
+                cstore::DlDef(Def::Trait(did)) => {
                     traits.push(TraitInfo::new(did));
                 }
-                decoder::DlDef(def::DefMod(did)) => {
-                    csearch::each_child_of_item(cstore, did, |dl, _, _| {
-                        handle_external_def(traits, ccx, cstore, dl)
-                    })
+                cstore::DlDef(Def::Mod(did)) => {
+                    if !external_mods.insert(did) {
+                        return;
+                    }
+                    for child in cstore.item_children(did) {
+                        handle_external_def(traits, external_mods,
+                                            ccx, cstore, child.def)
+                    }
                 }
                 _ => {}
             }
         }
-        let cstore = &ccx.tcx.sess.cstore;
-        cstore.iter_crate_data(|cnum, _| {
-            csearch::each_top_level_item_of_crate(cstore, cnum, |dl, _, _| {
-                handle_external_def(&mut traits, ccx, cstore, dl)
-            })
-        });
+        let cstore = &*ccx.tcx.sess.cstore;
+
+        for cnum in ccx.tcx.sess.cstore.crates() {
+            for child in cstore.crate_top_level_items(cnum) {
+                handle_external_def(&mut traits, &mut external_mods,
+                                    ccx, cstore, child.def)
+            }
+        }
 
         *ccx.all_traits.borrow_mut() = Some(traits);
     }

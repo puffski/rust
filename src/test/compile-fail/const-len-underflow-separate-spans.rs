@@ -8,14 +8,14 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// Check that an constant-evaluation underflow highlights the correct
+// Check that a constant-evaluation underflow highlights the correct
 // spot (where the underflow occurred), while also providing the
 // overall context for what caused the evaluation.
 
 const ONE: usize = 1;
 const TWO: usize = 2;
 const LEN: usize = ONE - TWO;
-//~^ ERROR array length constant evaluation error: attempted to sub with overflow [E0250]
+//~^ ERROR array length constant evaluation error: attempted to subtract with overflow [E0250]
 
 fn main() {
     let a: [i8; LEN] = unimplemented!();

@@ -8,15 +8,15 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(start, no_std)]
-#![no_std] // makes debugging this test *a lot* easier (during resolve)
+#![feature(start, no_core)]
+#![no_core] // makes debugging this test *a lot* easier (during resolve)
 
 // Test to make sure that globs don't leak in regular `use` statements.
 
 mod bar {
     pub use self::glob::*;
 
-    mod glob {
+    pub mod glob {
         use foo;
     }
 }

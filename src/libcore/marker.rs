@@ -13,25 +13,19 @@
 //! Rust types can be classified in various useful ways according to
 //! intrinsic properties of the type. These classifications, often called
 //! 'kinds', are represented as traits.
-//!
-//! They cannot be implemented by user code, but are instead implemented
-//! by the compiler automatically for the types to which they apply.
-//!
-//! Marker types are special types that are used with unsafe code to
-//! inform the compiler of special constraints. Marker types should
-//! only be needed when you are creating an abstraction that is
-//! implemented using unsafe code. In that case, you may want to embed
-//! some of the marker types below into your type.
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
 use clone::Clone;
 use cmp;
+use default::Default;
 use option::Option;
 use hash::Hash;
 use hash::Hasher;
 
-/// Types able to be transferred across thread boundaries.
+/// Types that can be transferred across thread boundaries.
+///
+/// This trait is automatically derived when the compiler determines it's appropriate.
 #[stable(feature = "rust1", since = "1.0.0")]
 #[lang = "send"]
 #[rustc_on_unimplemented = "`{Self}` cannot be sent between threads safely"]
@@ -39,12 +33,27 @@ pub unsafe trait Send {
     // empty.
 }
 
+#[stable(feature = "rust1", since = "1.0.0")]
 unsafe impl Send for .. { }
 
-impl<T> !Send for *const T { }
-impl<T> !Send for *mut T { }
+#[stable(feature = "rust1", since = "1.0.0")]
+impl<T: ?Sized> !Send for *const T { }
+#[stable(feature = "rust1", since = "1.0.0")]
+impl<T: ?Sized> !Send for *mut T { }
 
 /// Types with a constant size known at compile-time.
+///
+/// All type parameters which can be bounded have an implicit bound of `Sized`. The special syntax
+/// `?Sized` can be used to remove this bound if it is not appropriate.
+///
+/// ```
+/// # #![allow(dead_code)]
+/// struct Foo<T>(T);
+/// struct Bar<T: ?Sized>(T);
+///
+/// // struct FooUse(Foo<[i32]>); // error: Sized is not implemented for [i32]
+/// struct BarUse(Bar<[i32]>); // OK
+/// ```
 #[stable(feature = "rust1", since = "1.0.0")]
 #[lang = "sized"]
 #[rustc_on_unimplemented = "`{Self}` does not have a constant size known at compile-time"]
@@ -54,9 +63,9 @@ pub trait Sized {
 }
 
 /// Types that can be "unsized" to a dynamically sized type.
-#[unstable(feature = "unsize")]
+#[unstable(feature = "unsize", issue = "27732")]
 #[lang="unsize"]
-pub trait Unsize<T> {
+pub trait Unsize<T: ?Sized> {
     // Empty.
 }
 
@@ -103,6 +112,7 @@ pub trait Unsize<T> {
 /// `struct` can be `Copy`:
 ///
 /// ```
+/// # #[allow(dead_code)]
 /// struct Point {
 ///    x: i32,
 ///    y: i32,
@@ -112,6 +122,7 @@ pub trait Unsize<T> {
 /// A `struct` can be `Copy`, and `i32` is `Copy`, so therefore, `Point` is eligible to be `Copy`.
 ///
 /// ```
+/// # #![allow(dead_code)]
 /// # struct Point;
 /// struct PointList {
 ///     points: Vec<Point>,
@@ -159,6 +170,10 @@ pub trait Unsize<T> {
 /// to consider though: if you think your type may _not_ be able to implement `Copy` in the future,
 /// then it might be prudent to not implement `Copy`. This is because removing `Copy` is a breaking
 /// change: that second example would fail to compile if we made `Foo` non-`Copy`.
+///
+/// # Derivable
+///
+/// This trait can be used with `#[derive]`.
 #[stable(feature = "rust1", since = "1.0.0")]
 #[lang = "copy"]
 pub trait Copy : Clone {
@@ -181,7 +196,7 @@ pub trait Copy : Clone {
 ///
 /// A somewhat surprising consequence of the definition is `&mut T` is
 /// `Sync` (if `T` is `Sync`) even though it seems that it might
-/// provide unsynchronised mutation. The trick is a mutable reference
+/// provide unsynchronized mutation. The trick is a mutable reference
 /// stored in an aliasable reference (that is, `& &mut T`) becomes
 /// read-only, as if it were a `& &T`, hence there is no risk of a data
 /// race.
@@ -204,8 +219,10 @@ pub trait Copy : Clone {
 ///
 /// Any types with interior mutability must also use the `std::cell::UnsafeCell`
 /// wrapper around the value(s) which can be mutated when behind a `&`
-/// reference; not doing this is undefined behaviour (for example,
-/// `transmute`-ing from `&T` to `&mut T` is illegal).
+/// reference; not doing this is undefined behavior (for example,
+/// `transmute`-ing from `&T` to `&mut T` is invalid).
+///
+/// This trait is automatically derived when the compiler determines it's appropriate.
 #[stable(feature = "rust1", since = "1.0.0")]
 #[lang = "sync"]
 #[rustc_on_unimplemented = "`{Self}` cannot be shared between threads safely"]
@@ -213,56 +230,61 @@ pub unsafe trait Sync {
     // Empty
 }
 
+#[stable(feature = "rust1", since = "1.0.0")]
 unsafe impl Sync for .. { }
 
-impl<T> !Sync for *const T { }
-impl<T> !Sync for *mut T { }
-
-/// A type which is considered "not POD", meaning that it is not
-/// implicitly copyable. This is typically embedded in other types to
-/// ensure that they are never copied, even if they lack a destructor.
-#[unstable(feature = "core",
-           reason = "likely to change with new variance strategy")]
-#[deprecated(since = "1.2.0",
-             reason = "structs are by default not copyable")]
-#[lang = "no_copy_bound"]
-#[allow(deprecated)]
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct NoCopy;
+#[stable(feature = "rust1", since = "1.0.0")]
+impl<T: ?Sized> !Sync for *const T { }
+#[stable(feature = "rust1", since = "1.0.0")]
+impl<T: ?Sized> !Sync for *mut T { }
 
 macro_rules! impls{
     ($t: ident) => (
+        #[stable(feature = "rust1", since = "1.0.0")]
         impl<T:?Sized> Hash for $t<T> {
             #[inline]
             fn hash<H: Hasher>(&self, _: &mut H) {
             }
         }
 
+        #[stable(feature = "rust1", since = "1.0.0")]
         impl<T:?Sized> cmp::PartialEq for $t<T> {
             fn eq(&self, _other: &$t<T>) -> bool {
                 true
             }
         }
 
+        #[stable(feature = "rust1", since = "1.0.0")]
         impl<T:?Sized> cmp::Eq for $t<T> {
         }
 
+        #[stable(feature = "rust1", since = "1.0.0")]
         impl<T:?Sized> cmp::PartialOrd for $t<T> {
             fn partial_cmp(&self, _other: &$t<T>) -> Option<cmp::Ordering> {
                 Option::Some(cmp::Ordering::Equal)
             }
         }
 
+        #[stable(feature = "rust1", since = "1.0.0")]
         impl<T:?Sized> cmp::Ord for $t<T> {
             fn cmp(&self, _other: &$t<T>) -> cmp::Ordering {
                 cmp::Ordering::Equal
             }
         }
 
+        #[stable(feature = "rust1", since = "1.0.0")]
         impl<T:?Sized> Copy for $t<T> { }
 
+        #[stable(feature = "rust1", since = "1.0.0")]
         impl<T:?Sized> Clone for $t<T> {
             fn clone(&self) -> $t<T> {
+                $t
+            }
+        }
+
+        #[stable(feature = "rust1", since = "1.0.0")]
+        impl<T:?Sized> Default for $t<T> {
+            fn default() -> $t<T> {
                 $t
             }
         }
@@ -273,7 +295,15 @@ macro_rules! impls{
 /// even though it does not. This allows you to inform the compiler about certain safety properties
 /// of your code.
 ///
-/// Though they both have scary names, `PhantomData<T>` and "phantom types" are unrelated. 👻👻👻
+/// For a more in-depth explanation of how to use `PhantomData<T>`, please see [the Nomicon].
+///
+/// [the Nomicon]: ../../nomicon/phantom-data.html
+///
+/// # A ghastly note 👻👻👻
+///
+/// Though they both have scary names, `PhantomData<T>` and 'phantom types' are related, but not
+/// identical. Phantom types are a more general concept that don't require `PhantomData<T>` to
+/// implement, but `PhantomData<T>` is the most common way to implement them in a correct manner.
 ///
 /// # Examples
 ///
@@ -302,7 +332,8 @@ macro_rules! impls{
 /// ```
 /// use std::marker::PhantomData;
 ///
-/// struct Slice<'a, T:'a> {
+/// # #[allow(dead_code)]
+/// struct Slice<'a, T: 'a> {
 ///     start: *const T,
 ///     end: *const T,
 ///     phantom: PhantomData<&'a T>
@@ -322,6 +353,7 @@ macro_rules! impls{
 /// mismatches by enforcing types in the method implementations:
 ///
 /// ```
+/// # #![allow(dead_code)]
 /// # trait ResType { fn foo(&self); }
 /// # struct ParamType;
 /// # mod foreign_lib {
@@ -377,32 +409,37 @@ impls! { PhantomData }
 mod impls {
     use super::{Send, Sync, Sized};
 
+    #[stable(feature = "rust1", since = "1.0.0")]
     unsafe impl<'a, T: Sync + ?Sized> Send for &'a T {}
+    #[stable(feature = "rust1", since = "1.0.0")]
     unsafe impl<'a, T: Send + ?Sized> Send for &'a mut T {}
 }
 
-/// A marker trait indicates a type that can be reflected over. This
-/// trait is implemented for all types. Its purpose is to ensure that
-/// when you write a generic function that will employ reflection,
-/// that must be reflected (no pun intended) in the generic bounds of
-/// that function. Here is an example:
+/// Types that can be reflected over.
+///
+/// This trait is implemented for all types. Its purpose is to ensure
+/// that when you write a generic function that will employ
+/// reflection, that must be reflected (no pun intended) in the
+/// generic bounds of that function. Here is an example:
 ///
 /// ```
 /// #![feature(reflect_marker)]
 /// use std::marker::Reflect;
 /// use std::any::Any;
-/// fn foo<T:Reflect+'static>(x: &T) {
+///
+/// # #[allow(dead_code)]
+/// fn foo<T: Reflect + 'static>(x: &T) {
 ///     let any: &Any = x;
 ///     if any.is::<u32>() { println!("u32"); }
 /// }
 /// ```
 ///
-/// Without the declaration `T:Reflect`, `foo` would not type check
-/// (note: as a matter of style, it would be preferable to to write
-/// `T:Any`, because `T:Any` implies `T:Reflect` and `T:'static`, but
+/// Without the declaration `T: Reflect`, `foo` would not type check
+/// (note: as a matter of style, it would be preferable to write
+/// `T: Any`, because `T: Any` implies `T: Reflect` and `T: 'static`, but
 /// we use `Reflect` here to show how it works). The `Reflect` bound
 /// thus serves to alert `foo`'s caller to the fact that `foo` may
-/// behave differently depending on whether `T=u32` or not. In
+/// behave differently depending on whether `T = u32` or not. In
 /// particular, thanks to the `Reflect` bound, callers know that a
 /// function declared like `fn bar<T>(...)` will always act in
 /// precisely the same way no matter what type `T` is supplied,
@@ -414,10 +451,13 @@ mod impls {
 /// [1]: http://en.wikipedia.org/wiki/Parametricity
 #[rustc_reflect_like]
 #[unstable(feature = "reflect_marker",
-           reason = "requires RFC and more experience")]
-#[allow(deprecated)]
+           reason = "requires RFC and more experience",
+           issue = "27749")]
 #[rustc_on_unimplemented = "`{Self}` does not implement `Any`; \
                             ensure all type parameters are bounded by `Any`"]
 pub trait Reflect {}
 
+#[unstable(feature = "reflect_marker",
+           reason = "requires RFC and more experience",
+           issue = "27749")]
 impl Reflect for .. { }

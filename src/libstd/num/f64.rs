@@ -15,17 +15,24 @@
 #![stable(feature = "rust1", since = "1.0.0")]
 #![allow(missing_docs)]
 
-use prelude::v1::*;
-
+#[cfg(not(test))]
 use core::num;
+#[cfg(not(test))]
 use intrinsics;
+#[cfg(not(test))]
 use libc::c_int;
-use num::{FpCategory, ParseFloatError};
+#[cfg(not(test))]
+use num::FpCategory;
 
+#[stable(feature = "rust1", since = "1.0.0")]
 pub use core::f64::{RADIX, MANTISSA_DIGITS, DIGITS, EPSILON};
+#[stable(feature = "rust1", since = "1.0.0")]
 pub use core::f64::{MIN_EXP, MAX_EXP, MIN_10_EXP};
+#[stable(feature = "rust1", since = "1.0.0")]
 pub use core::f64::{MAX_10_EXP, NAN, INFINITY, NEG_INFINITY};
+#[stable(feature = "rust1", since = "1.0.0")]
 pub use core::f64::{MIN, MIN_POSITIVE, MAX};
+#[stable(feature = "rust1", since = "1.0.0")]
 pub use core::f64::consts;
 
 #[allow(dead_code)]
@@ -47,12 +54,12 @@ mod cmath {
         pub fn fmax(a: c_double, b: c_double) -> c_double;
         pub fn fmin(a: c_double, b: c_double) -> c_double;
         pub fn fmod(a: c_double, b: c_double) -> c_double;
-        pub fn nextafter(x: c_double, y: c_double) -> c_double;
         pub fn frexp(n: c_double, value: &mut c_int) -> c_double;
+        pub fn ilogb(n: c_double) -> c_int;
         pub fn ldexp(x: c_double, n: c_int) -> c_double;
         pub fn logb(n: c_double) -> c_double;
         pub fn log1p(n: c_double) -> c_double;
-        pub fn ilogb(n: c_double) -> c_int;
+        pub fn nextafter(x: c_double, y: c_double) -> c_double;
         pub fn modf(n: c_double, iptr: &mut c_double) -> c_double;
         pub fn sinh(n: c_double) -> c_double;
         pub fn tan(n: c_double) -> c_double;
@@ -79,14 +86,7 @@ mod cmath {
 
 #[cfg(not(test))]
 #[lang = "f64"]
-#[stable(feature = "rust1", since = "1.0.0")]
 impl f64 {
-    /// Parses a float as with a given radix
-    #[unstable(feature = "float_from_str_radix", reason = "recently moved API")]
-    pub fn from_str_radix(s: &str, radix: u32) -> Result<f64, ParseFloatError> {
-        num::Float::from_str_radix(s, radix)
-    }
-
     /// Returns `true` if this value is `NaN` and false otherwise.
     ///
     /// ```
@@ -191,7 +191,8 @@ impl f64 {
     /// The floating point encoding is documented in the [Reference][floating-point].
     ///
     /// ```
-    /// # #![feature(float_extras)]
+    /// #![feature(float_extras)]
+    ///
     /// let num = 2.0f64;
     ///
     /// // (8388608, -22, 1)
@@ -205,8 +206,9 @@ impl f64 {
     ///
     /// assert!(abs_difference < 1e-10);
     /// ```
-    /// [floating-point]: ../../../../../reference.html#machine-types
-    #[unstable(feature = "float_extras", reason = "signature is undecided")]
+    /// [floating-point]: ../reference.html#machine-types
+    #[unstable(feature = "float_extras", reason = "signature is undecided",
+               issue = "27752")]
     #[inline]
     pub fn integer_decode(self) -> (u64, i16, i8) { num::Float::integer_decode(self) }
 
@@ -221,7 +223,9 @@ impl f64 {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn floor(self) -> f64 { num::Float::floor(self) }
+    pub fn floor(self) -> f64 {
+        unsafe { intrinsics::floorf64(self) }
+    }
 
     /// Returns the smallest integer greater than or equal to a number.
     ///
@@ -234,7 +238,9 @@ impl f64 {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn ceil(self) -> f64 { num::Float::ceil(self) }
+    pub fn ceil(self) -> f64 {
+        unsafe { intrinsics::ceilf64(self) }
+    }
 
     /// Returns the nearest integer to a number. Round half-way cases away from
     /// `0.0`.
@@ -248,7 +254,9 @@ impl f64 {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn round(self) -> f64 { num::Float::round(self) }
+    pub fn round(self) -> f64 {
+        unsafe { intrinsics::roundf64(self) }
+    }
 
     /// Returns the integer part of a number.
     ///
@@ -261,7 +269,9 @@ impl f64 {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn trunc(self) -> f64 { num::Float::trunc(self) }
+    pub fn trunc(self) -> f64 {
+        unsafe { intrinsics::truncf64(self) }
+    }
 
     /// Returns the fractional part of a number.
     ///
@@ -276,7 +286,7 @@ impl f64 {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn fract(self) -> f64 { num::Float::fract(self) }
+    pub fn fract(self) -> f64 { self - self.trunc() }
 
     /// Computes the absolute value of `self`. Returns `NAN` if the
     /// number is `NAN`.
@@ -337,12 +347,12 @@ impl f64 {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn is_sign_positive(self) -> bool { num::Float::is_positive(self) }
+    pub fn is_sign_positive(self) -> bool { num::Float::is_sign_positive(self) }
 
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[deprecated(since = "1.0.0", reason = "renamed to is_sign_positive")]
+    #[rustc_deprecated(since = "1.0.0", reason = "renamed to is_sign_positive")]
     #[inline]
-    pub fn is_positive(self) -> bool { num::Float::is_positive(self) }
+    pub fn is_positive(self) -> bool { num::Float::is_sign_positive(self) }
 
     /// Returns `true` if `self`'s sign is negative, including `-0.0`
     /// and `NEG_INFINITY`.
@@ -362,12 +372,12 @@ impl f64 {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn is_sign_negative(self) -> bool { num::Float::is_negative(self) }
+    pub fn is_sign_negative(self) -> bool { num::Float::is_sign_negative(self) }
 
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[deprecated(since = "1.0.0", reason = "renamed to is_sign_negative")]
+    #[rustc_deprecated(since = "1.0.0", reason = "renamed to is_sign_negative")]
     #[inline]
-    pub fn is_negative(self) -> bool { num::Float::is_negative(self) }
+    pub fn is_negative(self) -> bool { num::Float::is_sign_negative(self) }
 
     /// Fused multiply-add. Computes `(self * a) + b` with only one rounding
     /// error. This produces a more accurate result with better performance than
@@ -385,7 +395,9 @@ impl f64 {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn mul_add(self, a: f64, b: f64) -> f64 { num::Float::mul_add(self, a, b) }
+    pub fn mul_add(self, a: f64, b: f64) -> f64 {
+        unsafe { intrinsics::fmaf64(self, a, b) }
+    }
 
     /// Takes the reciprocal (inverse) of a number, `1/x`.
     ///
@@ -423,7 +435,9 @@ impl f64 {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn powf(self, n: f64) -> f64 { num::Float::powf(self, n) }
+    pub fn powf(self, n: f64) -> f64 {
+        unsafe { intrinsics::powf64(self, n) }
+    }
 
     /// Takes the square root of a number.
     ///
@@ -440,7 +454,13 @@ impl f64 {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn sqrt(self) -> f64 { num::Float::sqrt(self) }
+    pub fn sqrt(self) -> f64 {
+        if self < 0.0 {
+            NAN
+        } else {
+            unsafe { intrinsics::sqrtf64(self) }
+        }
+    }
 
     /// Returns `e^(self)`, (the exponential function).
     ///
@@ -456,7 +476,9 @@ impl f64 {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn exp(self) -> f64 { num::Float::exp(self) }
+    pub fn exp(self) -> f64 {
+        unsafe { intrinsics::expf64(self) }
+    }
 
     /// Returns `2^(self)`.
     ///
@@ -470,7 +492,9 @@ impl f64 {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn exp2(self) -> f64 { num::Float::exp2(self) }
+    pub fn exp2(self) -> f64 {
+        unsafe { intrinsics::exp2f64(self) }
+    }
 
     /// Returns the natural logarithm of the number.
     ///
@@ -486,7 +510,9 @@ impl f64 {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn ln(self) -> f64 { num::Float::ln(self) }
+    pub fn ln(self) -> f64 {
+        self.log_wrapper(|n| { unsafe { intrinsics::logf64(n) } })
+    }
 
     /// Returns the logarithm of the number with respect to an arbitrary base.
     ///
@@ -505,7 +531,7 @@ impl f64 {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn log(self, base: f64) -> f64 { num::Float::log(self, base) }
+    pub fn log(self, base: f64) -> f64 { self.ln() / base.ln() }
 
     /// Returns the base 2 logarithm of the number.
     ///
@@ -519,7 +545,9 @@ impl f64 {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn log2(self) -> f64 { num::Float::log2(self) }
+    pub fn log2(self) -> f64 {
+        self.log_wrapper(|n| { unsafe { intrinsics::log2f64(n) } })
+    }
 
     /// Returns the base 10 logarithm of the number.
     ///
@@ -533,7 +561,9 @@ impl f64 {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn log10(self) -> f64 { num::Float::log10(self) }
+    pub fn log10(self) -> f64 {
+        self.log_wrapper(|n| { unsafe { intrinsics::log10f64(n) } })
+    }
 
     /// Converts radians to degrees.
     ///
@@ -568,14 +598,16 @@ impl f64 {
     /// Constructs a floating point number of `x*2^exp`.
     ///
     /// ```
-    /// # #![feature(float_extras)]
+    /// #![feature(float_extras)]
+    ///
     /// // 3*2^2 - 12 == 0
     /// let abs_difference = (f64::ldexp(3.0, 2) - 12.0).abs();
     ///
     /// assert!(abs_difference < 1e-10);
     /// ```
     #[unstable(feature = "float_extras",
-               reason = "pending integer conventions")]
+               reason = "pending integer conventions",
+               issue = "27752")]
     #[inline]
     pub fn ldexp(x: f64, exp: isize) -> f64 {
         unsafe { cmath::ldexp(x, exp as c_int) }
@@ -588,7 +620,8 @@ impl f64 {
     ///  * `0.5 <= abs(x) < 1.0`
     ///
     /// ```
-    /// # #![feature(float_extras)]
+    /// #![feature(float_extras)]
+    ///
     /// let x = 4.0_f64;
     ///
     /// // (1/2)*2^3 -> 1 * 8/2 -> 4.0
@@ -600,7 +633,8 @@ impl f64 {
     /// assert!(abs_difference_1 < 1e-10);
     /// ```
     #[unstable(feature = "float_extras",
-               reason = "pending integer conventions")]
+               reason = "pending integer conventions",
+               issue = "27752")]
     #[inline]
     pub fn frexp(self) -> (f64, isize) {
         unsafe {
@@ -614,7 +648,7 @@ impl f64 {
     /// `other`.
     ///
     /// ```
-    /// # #![feature(float_extras)]
+    /// #![feature(float_extras)]
     ///
     /// let x = 1.0f32;
     ///
@@ -623,7 +657,8 @@ impl f64 {
     /// assert!(abs_diff < 1e-10);
     /// ```
     #[unstable(feature = "float_extras",
-               reason = "unsure about its place in the world")]
+               reason = "unsure about its place in the world",
+               issue = "27752")]
     #[inline]
     pub fn next_after(self, other: f64) -> f64 {
         unsafe { cmath::nextafter(self, other) }
@@ -988,9 +1023,10 @@ impl f64 {
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
     pub fn asinh(self) -> f64 {
-        match self {
-            NEG_INFINITY => NEG_INFINITY,
-            x => (x + ((x * x) + 1.0).sqrt()).ln(),
+        if self == NEG_INFINITY {
+            NEG_INFINITY
+        } else {
+            (self + ((self * self) + 1.0).sqrt()).ln()
         }
     }
 
@@ -1029,6 +1065,31 @@ impl f64 {
     #[inline]
     pub fn atanh(self) -> f64 {
         0.5 * ((2.0 * self) / (1.0 - self)).ln_1p()
+    }
+
+    // Solaris/Illumos requires a wrapper around log, log2, and log10 functions
+    // because of their non-standard behavior (e.g. log(-n) returns -Inf instead
+    // of expected NaN).
+    fn log_wrapper<F: Fn(f64) -> f64>(self, log_fn: F) -> f64 {
+        if !cfg!(target_os = "solaris") {
+            log_fn(self)
+        } else {
+            if self.is_finite() {
+                if self > 0.0 {
+                    log_fn(self)
+                } else if self == 0.0 {
+                    NEG_INFINITY // log(0) = -Inf
+                } else {
+                    NAN // log(-n) = NaN
+                }
+            } else if self.is_nan() {
+                self // log(NaN) = NaN
+            } else if self > 0.0 {
+                self // log(Inf) = Inf
+            } else {
+                NAN // log(-Inf) = NaN
+            }
+        }
     }
 }
 
@@ -1204,6 +1265,7 @@ mod tests {
     }
 
     #[test]
+    #[rustc_no_mir] // FIXME #27840 MIR NAN ends up negative.
     fn test_integer_decode() {
         assert_eq!(3.14159265359f64.integer_decode(), (7074237752028906, -51, 1));
         assert_eq!((-8573.5918555f64).integer_decode(), (4713381968463931, -39, -1));
@@ -1528,11 +1590,9 @@ mod tests {
 
     #[test]
     fn test_ldexp() {
-        // We have to use from_str until base-2 exponents
-        // are supported in floating-point literals
-        let f1: f64 = f64::from_str_radix("1p-123", 16).unwrap();
-        let f2: f64 = f64::from_str_radix("1p-111", 16).unwrap();
-        let f3: f64 = f64::from_str_radix("1.Cp-12", 16).unwrap();
+        let f1 = 2.0f64.powi(-123);
+        let f2 = 2.0f64.powi(-111);
+        let f3 = 1.75 * 2.0f64.powi(-12);
         assert_eq!(f64::ldexp(1f64, -123), f1);
         assert_eq!(f64::ldexp(1f64, -111), f2);
         assert_eq!(f64::ldexp(1.75f64, -12), f3);
@@ -1550,11 +1610,9 @@ mod tests {
 
     #[test]
     fn test_frexp() {
-        // We have to use from_str until base-2 exponents
-        // are supported in floating-point literals
-        let f1: f64 = f64::from_str_radix("1p-123", 16).unwrap();
-        let f2: f64 = f64::from_str_radix("1p-111", 16).unwrap();
-        let f3: f64 = f64::from_str_radix("1.Cp-123", 16).unwrap();
+        let f1 = 2.0f64.powi(-123);
+        let f2 = 2.0f64.powi(-111);
+        let f3 = 1.75 * 2.0f64.powi(-123);
         let (x1, exp1) = f1.frexp();
         let (x2, exp2) = f2.frexp();
         let (x3, exp3) = f3.frexp();
@@ -1650,7 +1708,6 @@ mod tests {
     fn test_real_consts() {
         use super::consts;
         let pi: f64 = consts::PI;
-        let two_pi: f64 = consts::PI_2;
         let frac_pi_2: f64 = consts::FRAC_PI_2;
         let frac_pi_3: f64 = consts::FRAC_PI_3;
         let frac_pi_4: f64 = consts::FRAC_PI_4;
@@ -1667,7 +1724,6 @@ mod tests {
         let ln_2: f64 = consts::LN_2;
         let ln_10: f64 = consts::LN_10;
 
-        assert_approx_eq!(two_pi, 2.0 * pi);
         assert_approx_eq!(frac_pi_2, pi / 2f64);
         assert_approx_eq!(frac_pi_3, pi / 3f64);
         assert_approx_eq!(frac_pi_4, pi / 4f64);

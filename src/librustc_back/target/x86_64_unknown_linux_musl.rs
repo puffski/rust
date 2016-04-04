@@ -58,8 +58,8 @@ pub fn target() -> Target {
     //
     // Each target directory for musl has these object files included in it so
     // they'll be included from there.
-    base.pre_link_objects.push("crt1.o".to_string());
-    base.pre_link_objects.push("crti.o".to_string());
+    base.pre_link_objects_exe.push("crt1.o".to_string());
+    base.pre_link_objects_exe.push("crti.o".to_string());
     base.post_link_objects.push("crtn.o".to_string());
 
     // MUSL support doesn't currently include dynamic linking, so there's no
@@ -76,6 +76,7 @@ pub fn target() -> Target {
         arch: "x86_64".to_string(),
         target_os: "linux".to_string(),
         target_env: "musl".to_string(),
+        target_vendor: "unknown".to_string(),
         options: base,
     }
 }

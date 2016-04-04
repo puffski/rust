@@ -8,8 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use prelude::v1::*;
-
 use cell::Cell;
 use error::{Error};
 use fmt;
@@ -73,7 +71,7 @@ pub enum TryLockError<T> {
     /// The lock could not be acquired because another thread failed while holding
     /// the lock.
     #[stable(feature = "rust1", since = "1.0.0")]
-    Poisoned(PoisonError<T>),
+    Poisoned(#[stable(feature = "rust1", since = "1.0.0")] PoisonError<T>),
     /// The lock could not be acquired at this time because the operation would
     /// otherwise block.
     #[stable(feature = "rust1", since = "1.0.0")]
@@ -112,7 +110,8 @@ impl<T> fmt::Display for PoisonError<T> {
     }
 }
 
-impl<T: Send + Reflect> Error for PoisonError<T> {
+#[stable(feature = "rust1", since = "1.0.0")]
+impl<T: Reflect> Error for PoisonError<T> {
     fn description(&self) -> &str {
         "poisoned lock: another task failed inside"
     }
@@ -141,6 +140,7 @@ impl<T> PoisonError<T> {
     pub fn get_mut(&mut self) -> &mut T { &mut self.guard }
 }
 
+#[stable(feature = "rust1", since = "1.0.0")]
 impl<T> From<PoisonError<T>> for TryLockError<T> {
     fn from(err: PoisonError<T>) -> TryLockError<T> {
         TryLockError::Poisoned(err)
@@ -158,13 +158,17 @@ impl<T> fmt::Debug for TryLockError<T> {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
-impl<T: Send + Reflect> fmt::Display for TryLockError<T> {
+impl<T> fmt::Display for TryLockError<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.description().fmt(f)
+        match *self {
+            TryLockError::Poisoned(..) => "poisoned lock: another task failed inside",
+            TryLockError::WouldBlock => "try_lock failed because the operation would block"
+        }.fmt(f)
     }
 }
 
-impl<T: Send + Reflect> Error for TryLockError<T> {
+#[stable(feature = "rust1", since = "1.0.0")]
+impl<T: Reflect> Error for TryLockError<T> {
     fn description(&self) -> &str {
         match *self {
             TryLockError::Poisoned(ref p) => p.description(),

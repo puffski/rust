@@ -8,10 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use prelude::v1::*;
-
 use cell::UnsafeCell;
-use libc::{self, DWORD};
 use sys::c;
 use sys::mutex::{self, Mutex};
 use sys::os;
@@ -31,7 +28,7 @@ impl Condvar {
     pub unsafe fn wait(&self, mutex: &Mutex) {
         let r = c::SleepConditionVariableSRW(self.inner.get(),
                                              mutex::raw(mutex),
-                                             libc::INFINITE,
+                                             c::INFINITE,
                                              0);
         debug_assert!(r != 0);
     }
@@ -42,8 +39,7 @@ impl Condvar {
                                              super::dur2timeout(dur),
                                              0);
         if r == 0 {
-            const ERROR_TIMEOUT: DWORD = 0x5B4;
-            debug_assert_eq!(os::errno() as usize, ERROR_TIMEOUT as usize);
+            debug_assert_eq!(os::errno() as usize, c::ERROR_TIMEOUT as usize);
             false
         } else {
             true

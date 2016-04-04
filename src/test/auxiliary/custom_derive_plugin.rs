@@ -15,17 +15,19 @@
 #![feature(rustc_private)]
 
 extern crate syntax;
+extern crate syntax_ext;
 extern crate rustc;
+extern crate rustc_plugin;
 
 use syntax::ast;
 use syntax::codemap::Span;
 use syntax::ext::base::{MultiDecorator, ExtCtxt, Annotatable};
 use syntax::ext::build::AstBuilder;
-use syntax::ext::deriving::generic::{cs_fold, TraitDef, MethodDef, combine_substructure};
-use syntax::ext::deriving::generic::ty::{Literal, LifetimeBounds, Path, borrowed_explicit_self};
 use syntax::parse::token;
 use syntax::ptr::P;
-use rustc::plugin::Registry;
+use syntax_ext::deriving::generic::{cs_fold, TraitDef, MethodDef, combine_substructure};
+use syntax_ext::deriving::generic::ty::{Literal, LifetimeBounds, Path, borrowed_explicit_self};
+use rustc_plugin::Registry;
 
 #[plugin_registrar]
 pub fn plugin_registrar(reg: &mut Registry) {
@@ -46,6 +48,7 @@ fn expand(cx: &mut ExtCtxt,
         additional_bounds: vec![],
         generics: LifetimeBounds::empty(),
         associated_types: vec![],
+        is_unsafe: false,
         methods: vec![
             MethodDef {
                 name: "total_sum",
@@ -59,7 +62,7 @@ fn expand(cx: &mut ExtCtxt,
                     let zero = cx.expr_isize(span, 0);
                     cs_fold(false,
                             |cx, span, subexpr, field, _| {
-                                cx.expr_binary(span, ast::BiAdd, subexpr,
+                                cx.expr_binary(span, ast::BinOpKind::Add, subexpr,
                                     cx.expr_method_call(span, field,
                                         token::str_to_ident("total_sum"), vec![]))
                             },

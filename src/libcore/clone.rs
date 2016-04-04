@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! The `Clone` trait for types that cannot be 'implicitly copied'
+//! The `Clone` trait for types that cannot be 'implicitly copied'.
 //!
 //! In Rust, some simple types are "implicitly copyable" and when you
 //! assign them or pass them as arguments, the receiver will get a copy,
@@ -18,12 +18,37 @@
 //! them cheap and safe to copy. For other types copies must be made
 //! explicitly, by convention implementing the `Clone` trait and calling
 //! the `clone` method.
+//!
+//! Basic usage example:
+//!
+//! ```
+//! let s = String::new(); // String type implements Clone
+//! let copy = s.clone(); // so we can clone it
+//! ```
+//!
+//! To easily implement the Clone trait, you can also use
+//! `#[derive(Clone)]`. Example:
+//!
+//! ```
+//! #[derive(Clone)] // we add the Clone trait to Morpheus struct
+//! struct Morpheus {
+//!    blue_pill: f32,
+//!    red_pill: i64,
+//! }
+//!
+//! fn main() {
+//!    let f = Morpheus { blue_pill: 0.0, red_pill: 0 };
+//!    let copy = f.clone(); // and now we can clone it!
+//! }
+//! ```
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
 use marker::Sized;
 
 /// A common trait for cloning an object.
+///
+/// This trait can be used with `#[derive]`.
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait Clone : Sized {
     /// Returns a copy of the value.
@@ -86,45 +111,3 @@ clone_impl! { f64 }
 clone_impl! { () }
 clone_impl! { bool }
 clone_impl! { char }
-
-macro_rules! extern_fn_clone {
-    ($($A:ident),*) => (
-        #[stable(feature = "rust1", since = "1.0.0")]
-        impl<$($A,)* ReturnType> Clone for extern "Rust" fn($($A),*) -> ReturnType {
-            /// Returns a copy of a function pointer.
-            #[inline]
-            fn clone(&self) -> extern "Rust" fn($($A),*) -> ReturnType { *self }
-        }
-
-        #[stable(feature = "rust1", since = "1.0.0")]
-        impl<$($A,)* ReturnType> Clone for extern "C" fn($($A),*) -> ReturnType {
-            /// Returns a copy of a function pointer.
-            #[inline]
-            fn clone(&self) -> extern "C" fn($($A),*) -> ReturnType { *self }
-        }
-
-        #[stable(feature = "rust1", since = "1.0.0")]
-        impl<$($A,)* ReturnType> Clone for unsafe extern "Rust" fn($($A),*) -> ReturnType {
-            /// Returns a copy of a function pointer.
-            #[inline]
-            fn clone(&self) -> unsafe extern "Rust" fn($($A),*) -> ReturnType { *self }
-        }
-
-        #[stable(feature = "rust1", since = "1.0.0")]
-        impl<$($A,)* ReturnType> Clone for unsafe extern "C" fn($($A),*) -> ReturnType {
-            /// Returns a copy of a function pointer.
-            #[inline]
-            fn clone(&self) -> unsafe extern "C" fn($($A),*) -> ReturnType { *self }
-        }
-    )
-}
-
-extern_fn_clone! {}
-extern_fn_clone! { A }
-extern_fn_clone! { A, B }
-extern_fn_clone! { A, B, C }
-extern_fn_clone! { A, B, C, D }
-extern_fn_clone! { A, B, C, D, E }
-extern_fn_clone! { A, B, C, D, E, F }
-extern_fn_clone! { A, B, C, D, E, F, G }
-extern_fn_clone! { A, B, C, D, E, F, G, H }

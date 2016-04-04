@@ -12,7 +12,6 @@
 
 #![allow(dead_code)]
 
-use prelude::v1::*;
 use io::prelude::*;
 use rand::Rng;
 
@@ -64,8 +63,6 @@ impl<R: Read> Rng for ReaderRng<R> {
 
 #[cfg(test)]
 mod tests {
-    use prelude::v1::*;
-
     use super::ReaderRng;
     use rand::Rng;
 
@@ -73,8 +70,8 @@ mod tests {
     fn test_reader_rng_u64() {
         // transmute from the target to avoid endianness concerns.
         let v = &[0, 0, 0, 0, 0, 0, 0, 1,
-                  0  , 0, 0, 0, 0, 0, 0, 2,
-                  0,   0, 0, 0, 0, 0, 0, 3][..];
+                  0, 0, 0, 0, 0, 0, 0, 2,
+                  0, 0, 0, 0, 0, 0, 0, 3][..];
         let mut rng = ReaderRng::new(v);
 
         assert_eq!(rng.next_u64(), 1u64.to_be());

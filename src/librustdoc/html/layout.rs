@@ -47,6 +47,7 @@ r##"<!DOCTYPE html>
 
     <title>{title}</title>
 
+    <link rel="stylesheet" type="text/css" href="{root_path}rustdoc.css">
     <link rel="stylesheet" type="text/css" href="{root_path}main.css">
 
     {favicon}
@@ -62,10 +63,10 @@ r##"<!DOCTYPE html>
 
     {before_content}
 
-    <section class="sidebar">
+    <nav class="sidebar">
         {logo}
         {sidebar}
-    </section>
+    </nav>
 
     <nav class="sub">
         <form class="search-form js-only">
@@ -83,10 +84,12 @@ r##"<!DOCTYPE html>
 
     <section class="footer"></section>
 
-    <div id="help" class="hidden">
+    <aside id="help" class="hidden">
         <div>
+            <h1 class="hidden">Help</h1>
+
             <div class="shortcuts">
-                <h1>Keyboard Shortcuts</h1>
+                <h2>Keyboard Shortcuts</h2>
 
                 <dl>
                     <dt>?</dt>
@@ -103,7 +106,7 @@ r##"<!DOCTYPE html>
             </div>
 
             <div class="infos">
-                <h1>Search Tricks</h1>
+                <h2>Search Tricks</h2>
 
                 <p>
                     Prefix searches with a type followed by a colon (e.g.
@@ -113,17 +116,17 @@ r##"<!DOCTYPE html>
                 <p>
                     Accepted types are: <code>fn</code>, <code>mod</code>,
                     <code>struct</code>, <code>enum</code>,
-                    <code>trait</code>, <code>typedef</code> (or
-                    <code>tdef</code>).
+                    <code>trait</code>, <code>type</code>, <code>macro</code>,
+                    and <code>const</code>.
                 </p>
 
                 <p>
                     Search functions by type signature (e.g.
-                    <code>vec -> usize</code>)
+                    <code>vec -> usize</code> or <code>* -> vec</code>)
                 </p>
             </div>
         </div>
-    </div>
+    </aside>
 
     {after_content}
 
@@ -135,7 +138,7 @@ r##"<!DOCTYPE html>
     <script src="{root_path}jquery.js"></script>
     <script src="{root_path}main.js"></script>
     {play_js}
-    <script async src="{root_path}search-index.js"></script>
+    <script defer src="{root_path}search-index.js"></script>
 </body>
 </html>"##,
     content   = *t,
@@ -145,7 +148,7 @@ r##"<!DOCTYPE html>
         "".to_string()
     } else {
         format!("<a href='{}{}/index.html'>\
-                 <img src='{}' alt='' width='100'></a>",
+                 <img src='{}' alt='logo' width='100'></a>",
                 page.root_path, layout.krate,
                 layout.logo)
     },

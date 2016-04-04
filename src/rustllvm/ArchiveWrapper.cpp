@@ -24,7 +24,13 @@ struct LLVMRustArchiveMember {
   const char *name;
   Archive::Child child;
 
-  LLVMRustArchiveMember(): filename(NULL), name(NULL), child(NULL, NULL) {}
+  LLVMRustArchiveMember(): filename(NULL), name(NULL),
+#if LLVM_VERSION_MINOR >= 8
+    child(NULL, NULL, NULL)
+#else
+    child(NULL, NULL)
+#endif
+  {}
   ~LLVMRustArchiveMember() {}
 };
 
@@ -92,8 +98,18 @@ extern "C" const Archive::Child*
 LLVMRustArchiveIteratorNext(RustArchiveIterator *rai) {
     if (rai->cur == rai->end)
         return NULL;
-    const Archive::Child *cur = rai->cur.operator->();
-    Archive::Child *ret = new Archive::Child(*cur);
+#if LLVM_VERSION_MINOR >= 8
+    const ErrorOr<Archive::Child>* cur = rai->cur.operator->();
+    if (!*cur) {
+        LLVMRustSetLastError(cur->getError().message().c_str());
+        return NULL;
+    }
+    const Archive::Child &child = cur->get();
+#else
+    const Archive::Child &child = *rai->cur.operator->();
+#endif
+    Archive::Child *ret = new Archive::Child(child);
+
     ++rai->cur;
     return ret;
 }
@@ -163,12 +179,20 @@ LLVMRustWriteArchive(char *Dst,
     auto Member = NewMembers[i];
     assert(Member->name);
     if (Member->filename) {
+#if LLVM_VERSION_MINOR >= 8
+      Members.push_back(NewArchiveIterator(Member->filename));
+#else
       Members.push_back(NewArchiveIterator(Member->filename, Member->name));
+#endif
     } else {
       Members.push_back(NewArchiveIterator(Member->child, Member->name));
     }
   }
+#if LLVM_VERSION_MINOR >= 8
+  auto pair = writeArchive(Dst, Members, WriteSymbtab, Kind, true, false);
+#else
   auto pair = writeArchive(Dst, Members, WriteSymbtab, Kind, true);
+#endif
   if (!pair.second)
     return 0;
   LLVMRustSetLastError(pair.second.message().c_str());

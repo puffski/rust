@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// forbid-output: in expansion of
+// forbid-output: in this expansion of
 
 macro_rules! make_method {
     ($name:ident) => ( fn $name(&self) { } )
@@ -29,7 +29,7 @@ impl S {
 
     // Cause an error. It shouldn't have any macro backtrace frames.
     fn bar(&self) { }
-    fn bar(&self) { } //~ ERROR duplicate method
+    fn bar(&self) { } //~ ERROR duplicate definitions
 }
 
 fn main() { }

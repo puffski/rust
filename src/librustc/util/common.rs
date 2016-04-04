@@ -12,17 +12,16 @@
 
 use std::cell::{RefCell, Cell};
 use std::collections::HashMap;
-use std::collections::hash_state::HashState;
 use std::ffi::CString;
 use std::fmt::Debug;
-use std::hash::Hash;
+use std::hash::{Hash, BuildHasher};
 use std::iter::repeat;
 use std::path::Path;
-use std::time::Duration;
+use std::time::Instant;
 
-use syntax::ast;
-use syntax::visit;
-use syntax::visit::Visitor;
+use rustc_front::hir;
+use rustc_front::intravisit;
+use rustc_front::intravisit::Visitor;
 
 // The name of the associated type for `Fn` return types
 pub const FN_OUTPUT_NAME: &'static str = "Output";
@@ -32,11 +31,11 @@ pub const FN_OUTPUT_NAME: &'static str = "Output";
 #[derive(Clone, Copy, Debug)]
 pub struct ErrorReported;
 
-pub fn time<T, U, F>(do_it: bool, what: &str, u: U, f: F) -> T where
-    F: FnOnce(U) -> T,
+pub fn time<T, F>(do_it: bool, what: &str, f: F) -> T where
+    F: FnOnce() -> T,
 {
     thread_local!(static DEPTH: Cell<usize> = Cell::new(0));
-    if !do_it { return f(u); }
+    if !do_it { return f(); }
 
     let old = DEPTH.with(|slot| {
         let r = slot.get();
@@ -44,21 +43,15 @@ pub fn time<T, U, F>(do_it: bool, what: &str, u: U, f: F) -> T where
         r
     });
 
-    let mut rv = None;
-    let dur = {
-        let ref mut rvp = rv;
-
-        Duration::span(move || {
-            *rvp = Some(f(u))
-        })
-    };
-    let rv = rv.unwrap();
+    let start = Instant::now();
+    let rv = f();
+    let dur = start.elapsed();
 
     // Hack up our own formatting for the duration to make it easier for scripts
     // to parse (always use the same number of decimal places and the same unit).
     const NANOS_PER_SEC: f64 = 1_000_000_000.0;
-    let secs = dur.secs() as f64;
-    let secs = secs + dur.extra_nanos() as f64 / NANOS_PER_SEC;
+    let secs = dur.as_secs() as f64;
+    let secs = secs + dur.subsec_nanos() as f64 / NANOS_PER_SEC;
 
     let mem_string = match get_resident() {
         Some(n) => {
@@ -75,42 +68,50 @@ pub fn time<T, U, F>(do_it: bool, what: &str, u: U, f: F) -> T where
     rv
 }
 
-// Memory reporting
-#[cfg(unix)]
-fn get_resident() -> Option<usize> {
-    get_proc_self_statm_field(1)
-}
-
-#[cfg(windows)]
-fn get_resident() -> Option<usize> {
-    get_working_set_size()
-}
-
 // Like std::macros::try!, but for Option<>.
 macro_rules! option_try(
     ($e:expr) => (match $e { Some(e) => e, None => return None })
 );
 
+// Memory reporting
+#[cfg(unix)]
+fn get_resident() -> Option<usize> {
+    use std::fs::File;
+    use std::io::Read;
+
+    let field = 1;
+    let mut f = option_try!(File::open("/proc/self/statm").ok());
+    let mut contents = String::new();
+    option_try!(f.read_to_string(&mut contents).ok());
+    let s = option_try!(contents.split_whitespace().nth(field));
+    let npages = option_try!(s.parse::<usize>().ok());
+    Some(npages * 4096)
+}
+
 #[cfg(windows)]
-fn get_working_set_size() -> Option<usize> {
-    use libc::{BOOL, DWORD, HANDLE, SIZE_T, GetCurrentProcess};
+fn get_resident() -> Option<usize> {
+    type BOOL = i32;
+    type DWORD = u32;
+    type HANDLE = *mut u8;
+    use libc::size_t;
     use std::mem;
     #[repr(C)] #[allow(non_snake_case)]
     struct PROCESS_MEMORY_COUNTERS {
         cb: DWORD,
         PageFaultCount: DWORD,
-        PeakWorkingSetSize: SIZE_T,
-        WorkingSetSize: SIZE_T,
-        QuotaPeakPagedPoolUsage: SIZE_T,
-        QuotaPagedPoolUsage: SIZE_T,
-        QuotaPeakNonPagedPoolUsage: SIZE_T,
-        QuotaNonPagedPoolUsage: SIZE_T,
-        PagefileUsage: SIZE_T,
-        PeakPagefileUsage: SIZE_T,
+        PeakWorkingSetSize: size_t,
+        WorkingSetSize: size_t,
+        QuotaPeakPagedPoolUsage: size_t,
+        QuotaPagedPoolUsage: size_t,
+        QuotaPeakNonPagedPoolUsage: size_t,
+        QuotaNonPagedPoolUsage: size_t,
+        PagefileUsage: size_t,
+        PeakPagefileUsage: size_t,
     }
     type PPROCESS_MEMORY_COUNTERS = *mut PROCESS_MEMORY_COUNTERS;
     #[link(name = "psapi")]
     extern "system" {
+        fn GetCurrentProcess() -> HANDLE;
         fn GetProcessMemoryInfo(Process: HANDLE,
                                 ppsmemCounters: PPROCESS_MEMORY_COUNTERS,
                                 cb: DWORD) -> BOOL;
@@ -121,21 +122,6 @@ fn get_working_set_size() -> Option<usize> {
         0 => None,
         _ => Some(pmc.WorkingSetSize as usize),
     }
-}
-
-#[cfg_attr(windows, allow(dead_code))]
-fn get_proc_self_statm_field(field: usize) -> Option<usize> {
-    use std::fs::File;
-    use std::io::Read;
-
-    assert!(cfg!(unix));
-
-    let mut f = option_try!(File::open("/proc/self/statm").ok());
-    let mut contents = String::new();
-    option_try!(f.read_to_string(&mut contents).ok());
-    let s = option_try!(contents.split_whitespace().nth(field));
-    let npages = option_try!(s.parse::<usize>().ok());
-    Some(npages * ::std::env::page_size())
 }
 
 pub fn indent<R, F>(op: F) -> R where
@@ -163,140 +149,89 @@ pub fn indenter() -> Indenter {
     Indenter { _cannot_construct_outside_of_this_module: () }
 }
 
-struct LoopQueryVisitor<P> where P: FnMut(&ast::Expr_) -> bool {
+struct LoopQueryVisitor<P> where P: FnMut(&hir::Expr_) -> bool {
     p: P,
     flag: bool,
 }
 
-impl<'v, P> Visitor<'v> for LoopQueryVisitor<P> where P: FnMut(&ast::Expr_) -> bool {
-    fn visit_expr(&mut self, e: &ast::Expr) {
+impl<'v, P> Visitor<'v> for LoopQueryVisitor<P> where P: FnMut(&hir::Expr_) -> bool {
+    fn visit_expr(&mut self, e: &hir::Expr) {
         self.flag |= (self.p)(&e.node);
         match e.node {
           // Skip inner loops, since a break in the inner loop isn't a
           // break inside the outer loop
-          ast::ExprLoop(..) | ast::ExprWhile(..) => {}
-          _ => visit::walk_expr(self, e)
+          hir::ExprLoop(..) | hir::ExprWhile(..) => {}
+          _ => intravisit::walk_expr(self, e)
         }
     }
 }
 
 // Takes a predicate p, returns true iff p is true for any subexpressions
 // of b -- skipping any inner loops (loop, while, loop_body)
-pub fn loop_query<P>(b: &ast::Block, p: P) -> bool where P: FnMut(&ast::Expr_) -> bool {
+pub fn loop_query<P>(b: &hir::Block, p: P) -> bool where P: FnMut(&hir::Expr_) -> bool {
     let mut v = LoopQueryVisitor {
         p: p,
         flag: false,
     };
-    visit::walk_block(&mut v, b);
+    intravisit::walk_block(&mut v, b);
     return v.flag;
 }
 
-struct BlockQueryVisitor<P> where P: FnMut(&ast::Expr) -> bool {
+struct BlockQueryVisitor<P> where P: FnMut(&hir::Expr) -> bool {
     p: P,
     flag: bool,
 }
 
-impl<'v, P> Visitor<'v> for BlockQueryVisitor<P> where P: FnMut(&ast::Expr) -> bool {
-    fn visit_expr(&mut self, e: &ast::Expr) {
+impl<'v, P> Visitor<'v> for BlockQueryVisitor<P> where P: FnMut(&hir::Expr) -> bool {
+    fn visit_expr(&mut self, e: &hir::Expr) {
         self.flag |= (self.p)(e);
-        visit::walk_expr(self, e)
+        intravisit::walk_expr(self, e)
     }
 }
 
 // Takes a predicate p, returns true iff p is true for any subexpressions
 // of b -- skipping any inner loops (loop, while, loop_body)
-pub fn block_query<P>(b: &ast::Block, p: P) -> bool where P: FnMut(&ast::Expr) -> bool {
+pub fn block_query<P>(b: &hir::Block, p: P) -> bool where P: FnMut(&hir::Expr) -> bool {
     let mut v = BlockQueryVisitor {
         p: p,
         flag: false,
     };
-    visit::walk_block(&mut v, &*b);
+    intravisit::walk_block(&mut v, &b);
     return v.flag;
 }
 
-/// K: Eq + Hash<S>, V, S, H: Hasher<S>
-///
-/// Determines whether there exists a path from `source` to `destination`.  The
-/// graph is defined by the `edges_map`, which maps from a node `S` to a list of
-/// its adjacent nodes `T`.
-///
-/// Efficiency note: This is implemented in an inefficient way because it is
-/// typically invoked on very small graphs. If the graphs become larger, a more
-/// efficient graph representation and algorithm would probably be advised.
-pub fn can_reach<T, S>(edges_map: &HashMap<T, Vec<T>, S>, source: T,
-                       destination: T) -> bool
-    where S: HashState, T: Hash + Eq + Clone,
-{
-    if source == destination {
-        return true;
-    }
+pub trait MemoizationMap {
+    type Key: Clone;
+    type Value: Clone;
 
-    // Do a little breadth-first-search here.  The `queue` list
-    // doubles as a way to detect if we've seen a particular FR
-    // before.  Note that we expect this graph to be an *extremely
-    // shallow* tree.
-    let mut queue = vec!(source);
-    let mut i = 0;
-    while i < queue.len() {
-        match edges_map.get(&queue[i]) {
-            Some(edges) => {
-                for target in edges {
-                    if *target == destination {
-                        return true;
-                    }
-
-                    if !queue.iter().any(|x| x == target) {
-                        queue.push((*target).clone());
-                    }
-                }
-            }
-            None => {}
-        }
-        i += 1;
-    }
-    return false;
+    /// If `key` is present in the map, return the valuee,
+    /// otherwise invoke `op` and store the value in the map.
+    ///
+    /// NB: if the receiver is a `DepTrackingMap`, special care is
+    /// needed in the `op` to ensure that the correct edges are
+    /// added into the dep graph. See the `DepTrackingMap` impl for
+    /// more details!
+    fn memoize<OP>(&self, key: Self::Key, op: OP) -> Self::Value
+        where OP: FnOnce() -> Self::Value;
 }
 
-/// Memoizes a one-argument closure using the given RefCell containing
-/// a type implementing MutableMap to serve as a cache.
-///
-/// In the future the signature of this function is expected to be:
-/// ```
-/// pub fn memoized<T: Clone, U: Clone, M: MutableMap<T, U>>(
-///    cache: &RefCell<M>,
-///    f: &|T| -> U
-/// ) -> impl |T| -> U {
-/// ```
-/// but currently it is not possible.
-///
-/// # Examples
-/// ```
-/// struct Context {
-///    cache: RefCell<HashMap<usize, usize>>
-/// }
-///
-/// fn factorial(ctxt: &Context, n: usize) -> usize {
-///     memoized(&ctxt.cache, n, |n| match n {
-///         0 | 1 => n,
-///         _ => factorial(ctxt, n - 2) + factorial(ctxt, n - 1)
-///     })
-/// }
-/// ```
-#[inline(always)]
-pub fn memoized<T, U, S, F>(cache: &RefCell<HashMap<T, U, S>>, arg: T, f: F) -> U
-    where T: Clone + Hash + Eq,
-          U: Clone,
-          S: HashState,
-          F: FnOnce(T) -> U,
+impl<K, V, S> MemoizationMap for RefCell<HashMap<K,V,S>>
+    where K: Hash+Eq+Clone, V: Clone, S: BuildHasher
 {
-    let key = arg.clone();
-    let result = cache.borrow().get(&key).cloned();
-    match result {
-        Some(result) => result,
-        None => {
-            let result = f(arg);
-            cache.borrow_mut().insert(key, result.clone());
-            result
+    type Key = K;
+    type Value = V;
+
+    fn memoize<OP>(&self, key: K, op: OP) -> V
+        where OP: FnOnce() -> V
+    {
+        let result = self.borrow().get(&key).cloned();
+        match result {
+            Some(result) => result,
+            None => {
+                let result = op();
+                self.borrow_mut().insert(key, result.clone());
+                result
+            }
         }
     }
 }

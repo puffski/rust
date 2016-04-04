@@ -55,8 +55,8 @@ pub struct TocBuilder {
     /// strictly increasing (i.e. chain[0].level < chain[1].level <
     /// ...) with each entry being the most recent occurrence of a
     /// heading with that level (it doesn't include the most recent
-    /// occurrences of every level, just, if *is* in `chain` then is is
-    /// the most recent one).
+    /// occurrences of every level, just, if it *is* in `chain` then
+    /// it is the most recent one).
     ///
     /// We also have `chain[0].level <= top_level.entries[last]`.
     chain: Vec<TocEntry>
@@ -183,15 +183,15 @@ impl fmt::Debug for Toc {
 
 impl fmt::Display for Toc {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        try!(write!(fmt, "<ul>"));
+        write!(fmt, "<ul>")?;
         for entry in &self.entries {
             // recursively format this table of contents (the
             // `{children}` is the key).
-            try!(write!(fmt,
-                        "\n<li><a href=\"#{id}\">{num} {name}</a>{children}</li>",
-                        id = entry.id,
-                        num = entry.sec_number, name = entry.name,
-                        children = entry.children))
+            write!(fmt,
+                   "\n<li><a href=\"#{id}\">{num} {name}</a>{children}</li>",
+                   id = entry.id,
+                   num = entry.sec_number, name = entry.name,
+                   children = entry.children)?
         }
         write!(fmt, "</ul>")
     }

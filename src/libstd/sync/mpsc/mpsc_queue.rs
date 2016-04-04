@@ -40,8 +40,6 @@
 
 pub use self::PopResult::*;
 
-use core::prelude::*;
-
 use alloc::boxed::Box;
 use core::ptr;
 use core::cell::UnsafeCell;
@@ -135,7 +133,6 @@ impl<T> Queue<T> {
     }
 }
 
-#[stable(feature = "rust1", since = "1.0.0")]
 impl<T> Drop for Queue<T> {
     fn drop(&mut self) {
         unsafe {

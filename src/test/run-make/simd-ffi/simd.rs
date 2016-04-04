@@ -12,15 +12,15 @@
 #![crate_type = "lib"]
 // we can compile to a variety of platforms, because we don't need
 // cross-compiled standard libraries.
-#![feature(no_std)]
-#![no_std]
+#![feature(no_core)]
+#![no_core]
 
-#![feature(simd, simd_ffi, link_llvm_intrinsics, lang_items)]
+#![feature(repr_simd, simd_ffi, link_llvm_intrinsics, lang_items)]
 
 
 #[repr(C)]
 #[derive(Copy)]
-#[simd]
+#[repr(simd)]
 pub struct f32x4(f32, f32, f32, f32);
 
 
@@ -35,7 +35,7 @@ pub fn foo(x: f32x4) -> f32x4 {
 
 #[repr(C)]
 #[derive(Copy)]
-#[simd]
+#[repr(simd)]
 pub struct i32x4(i32, i32, i32, i32);
 
 
@@ -47,11 +47,11 @@ extern {
     fn integer(a: i32x4, b: i32x4) -> i32x4;
 
     // vmaxq_s32
-    #[cfg(any(target_arch = "arm"))]
+    #[cfg(target_arch = "arm")]
     #[link_name = "llvm.arm.neon.vmaxs.v4i32"]
     fn integer(a: i32x4, b: i32x4) -> i32x4;
     // vmaxq_s32
-    #[cfg(any(target_arch = "aarch64"))]
+    #[cfg(target_arch = "aarch64")]
     #[link_name = "llvm.aarch64.neon.maxs.v4i32"]
     fn integer(a: i32x4, b: i32x4) -> i32x4;
 
@@ -75,8 +75,6 @@ pub trait Sized { }
 #[lang = "copy"]
 pub trait Copy { }
 
-mod core {
-    pub mod marker {
-        pub use Copy;
-    }
+pub mod marker {
+    pub use Copy;
 }

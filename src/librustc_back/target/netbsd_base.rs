@@ -16,7 +16,6 @@ pub fn opts() -> TargetOptions {
         linker: "cc".to_string(),
         dynamic_linking: true,
         executables: true,
-        morestack: false,
         linker_is_gnu: true,
         has_rpath: true,
         pre_link_args: vec!(
@@ -25,9 +24,11 @@ pub fn opts() -> TargetOptions {
             // libraries which follow this flag.  Thus, use it before
             // specifying libraries to link to.
             "-Wl,--as-needed".to_string(),
+
+            // Always enable NX protection when it is available
+            "-Wl,-z,noexecstack".to_string(),
         ),
         position_independent_executables: true,
-        archive_format: "bsd".to_string(),
         .. Default::default()
     }
 }

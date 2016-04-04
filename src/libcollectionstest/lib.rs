@@ -8,66 +8,40 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![deny(warnings)]
+
 #![feature(ascii)]
-#![feature(append)]
-#![feature(bitset)]
-#![feature(bitvec)]
+#![feature(binary_heap_extras)]
 #![feature(box_syntax)]
 #![feature(btree_range)]
 #![feature(collections)]
 #![feature(collections_bound)]
+#![feature(copy_from_slice)]
 #![feature(const_fn)]
-#![feature(core)]
-#![feature(deque_extras)]
-#![feature(drain)]
+#![feature(fn_traits)]
 #![feature(enumset)]
-#![feature(hash_default)]
-#![feature(into_cow)]
-#![feature(iter_idx)]
-#![feature(iter_order)]
 #![feature(iter_arith)]
-#![feature(iter_to_vec)]
-#![feature(map_in_place)]
-#![feature(move_from)]
-#![feature(num_bits_bytes)]
+#![feature(map_entry_keys)]
+#![feature(map_values_mut)]
 #![feature(pattern)]
-#![feature(permutations)]
 #![feature(rand)]
-#![feature(range_inclusive)]
-#![feature(rustc_private)]
-#![feature(slice_bytes)]
-#![feature(slice_chars)]
-#![feature(slice_splits)]
-#![feature(slice_position_elem)]
-#![feature(split_off)]
+#![feature(set_recovery)]
 #![feature(step_by)]
 #![feature(str_char)]
 #![feature(str_escape)]
-#![feature(str_match_indices)]
-#![feature(str_split_at)]
-#![feature(str_utf16)]
-#![feature(box_str)]
-#![feature(subslice_offset)]
 #![feature(test)]
 #![feature(unboxed_closures)]
 #![feature(unicode)]
-#![feature(vec_deque_retain)]
-#![feature(vec_from_raw_buf)]
-#![feature(vec_push_all)]
-#![feature(vecmap)]
-
-#![allow(deprecated)]
-
-#[macro_use] extern crate log;
 
 extern crate collections;
 extern crate test;
 extern crate rustc_unicode;
 
+use std::hash::{Hash, Hasher, SipHasher};
+
 #[cfg(test)] #[macro_use] mod bench;
 
 mod binary_heap;
-mod bit;
 mod btree;
 mod enum_set;
 mod fmt;
@@ -76,5 +50,10 @@ mod slice;
 mod str;
 mod string;
 mod vec_deque;
-mod vec_map;
 mod vec;
+
+fn hash<T: Hash>(t: &T) -> u64 {
+    let mut s = SipHasher::new();
+    t.hash(&mut s);
+    s.finish()
+}

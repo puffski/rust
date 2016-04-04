@@ -13,6 +13,7 @@
 // compile-flags:-g
 
 #![allow(dead_code, unused_variables)]
+#![feature(omit_gdb_pretty_printer_section)]
 #![omit_gdb_pretty_printer_section]
 
 // This test makes sure that the compiler doesn't crash when trying to assign
@@ -20,15 +21,18 @@
 
 const CONSTANT: u64 = 3;
 
+#[derive(PartialEq, Eq)]
 struct Struct {
     a: isize,
     b: usize,
 }
 const STRUCT: Struct = Struct { a: 1, b: 2 };
 
+#[derive(PartialEq, Eq)]
 struct TupleStruct(u32);
 const TUPLE_STRUCT: TupleStruct = TupleStruct(4);
 
+#[derive(PartialEq, Eq)]
 enum Enum {
     Variant1(char),
     Variant2 { a: u8 },

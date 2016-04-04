@@ -8,7 +8,16 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// compile-flags:-g
+#![feature(rustc_attrs)]
+
+// We disable tail merging here because it can't preserve debuginfo and thus
+// potentially breaks the backtraces. Also, subtle changes can decide whether
+// tail merging suceeds, so the test might work today but fail tomorrow due to a
+// seemingly completely unrelated change.
+// Unfortunately, LLVM has no "disable" option for this, so we have to set
+// "enable" to 0 instead.
+
+// compile-flags:-g -Cllvm-args=-enable-tail-merge=0
 // ignore-pretty as this critically relies on line numbers
 
 use std::io;
@@ -21,28 +30,21 @@ macro_rules! pos {
     () => ((file!(), line!()))
 }
 
-#[cfg(all(unix,
-          not(target_os = "macos"),
-          not(target_os = "ios"),
-          not(target_os = "android"),
-          not(all(target_os = "linux", target_arch = "arm"))))]
 macro_rules! dump_and_die {
     ($($pos:expr),*) => ({
         // FIXME(#18285): we cannot include the current position because
         // the macro span takes over the last frame's file/line.
-        dump_filelines(&[$($pos),*]);
-        panic!();
+        if cfg!(target_os = "macos") ||
+           cfg!(target_os = "ios") ||
+           cfg!(target_os = "android") ||
+           cfg!(all(target_os = "linux", target_arch = "arm")) ||
+           cfg!(all(windows, target_env = "gnu")) {
+            // skip these platforms as this support isn't implemented yet.
+        } else {
+            dump_filelines(&[$($pos),*]);
+            panic!();
+        }
     })
-}
-
-// this does not work on Windows, Android, OSX or iOS
-#[cfg(any(not(unix),
-          target_os = "macos",
-          target_os = "ios",
-          target_os = "android",
-          all(target_os = "linux", target_arch = "arm")))]
-macro_rules! dump_and_die {
-    ($($pos:expr),*) => ({ let _ = [$($pos),*]; })
 }
 
 // we can't use a function as it will alter the backtrace
@@ -61,7 +63,10 @@ type Pos = (&'static str, u32);
 // this goes to stdout and each line has to be occurred
 // in the following backtrace to stderr with a correct order.
 fn dump_filelines(filelines: &[Pos]) {
-    for &(file, line) in filelines.iter().rev() {
+    // Skip top frame for MSVC, because it sees the macro rather than
+    // the containing function.
+    let skip = if cfg!(target_env = "msvc") {1} else {0};
+    for &(file, line) in filelines.iter().rev().skip(skip) {
         // extract a basename
         let basename = file.split(&['/', '\\'][..]).last().unwrap();
         println!("{}:{}", basename, line);
@@ -69,6 +74,7 @@ fn dump_filelines(filelines: &[Pos]) {
 }
 
 #[inline(never)]
+#[rustc_no_mir] // FIXME #31005 MIR missing debuginfo currently.
 fn inner(counter: &mut i32, main_pos: Pos, outer_pos: Pos) {
     check!(counter; main_pos, outer_pos);
     check!(counter; main_pos, outer_pos);
@@ -80,12 +86,19 @@ fn inner(counter: &mut i32, main_pos: Pos, outer_pos: Pos) {
     });
 }
 
-#[inline(always)]
+// LLVM does not yet output the required debug info to support showing inlined
+// function calls in backtraces when targetting MSVC, so disable inlining in
+// this case.
+#[cfg_attr(not(target_env = "msvc"), inline(always))]
+#[cfg_attr(target_env = "msvc", inline(never))]
+#[rustc_no_mir] // FIXME #31005 MIR missing debuginfo currently.
 fn inner_inlined(counter: &mut i32, main_pos: Pos, outer_pos: Pos) {
     check!(counter; main_pos, outer_pos);
     check!(counter; main_pos, outer_pos);
 
-    #[inline(always)]
+    // Again, disable inlining for MSVC.
+    #[cfg_attr(not(target_env = "msvc"), inline(always))]
+    #[cfg_attr(target_env = "msvc", inline(never))]
     fn inner_further_inlined(counter: &mut i32, main_pos: Pos, outer_pos: Pos, inner_pos: Pos) {
         check!(counter; main_pos, outer_pos, inner_pos);
     }
@@ -97,9 +110,14 @@ fn inner_inlined(counter: &mut i32, main_pos: Pos, outer_pos: Pos) {
     let inner_pos = pos!(); aux::callback_inlined(|aux_pos| {
         check!(counter; main_pos, outer_pos, inner_pos, aux_pos);
     });
+
+    // this tests a distinction between two independent calls to the inlined function.
+    // (un)fortunately, LLVM somehow merges two consecutive such calls into one node.
+    inner_further_inlined(counter, main_pos, outer_pos, pos!());
 }
 
 #[inline(never)]
+#[rustc_no_mir] // FIXME #31005 MIR missing debuginfo currently.
 fn outer(mut counter: i32, main_pos: Pos) {
     inner(&mut counter, main_pos, pos!());
     inner_inlined(&mut counter, main_pos, pos!());
@@ -144,6 +162,7 @@ fn run_test(me: &str) {
 }
 
 #[inline(never)]
+#[rustc_no_mir] // FIXME #31005 MIR missing debuginfo currently.
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() >= 2 {
@@ -155,3 +174,4 @@ fn main() {
         run_test(&args[0]);
     }
 }
+

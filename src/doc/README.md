@@ -1,16 +1,11 @@
 # Rust documentations
 
-## Dependencies
-
-[Pandoc](http://johnmacfarlane.net/pandoc/installing.html), a universal
-document converter, is required to generate docs as HTML from Rust's
-source code.
-
 ## Building
 
-To generate all the docs, just run `make docs` from the root of the repository.
-This will convert the distributed Markdown docs to HTML and generate HTML doc
-for the 'std' and 'extra' libraries.
+To generate all the docs, follow the "Building Documentation" instructions in
+the README in the root of the repository. This will convert the distributed
+Markdown docs to HTML and generate HTML doc for the books, 'std' and 'extra'
+libraries.
 
 To generate HTML documentation from one source file/crate, do something like:
 
@@ -26,15 +21,12 @@ To generate an HTML version of a doc from Markdown manually, you can do
 something like:
 
 ~~~~
-pandoc --from=markdown --to=html5 --number-sections -o reference.html reference.md
+rustdoc reference.md
 ~~~~
 
 (`reference.md` being the Rust Reference Manual.)
 
-The syntax for pandoc flavored markdown can be found at:
+An overview of how to use the `rustdoc` command is available [in the docs][1].
+Further details are available from the command line by with `rustdoc --help`.
 
-- http://johnmacfarlane.net/pandoc/README.html#pandocs-markdown
-
-A nice quick reference (for non-pandoc markdown) is at:
-
-- http://kramdown.gettalong.org/quickref.html
+[1]: https://github.com/rust-lang/rust/blob/master/src/doc/book/documentation.md

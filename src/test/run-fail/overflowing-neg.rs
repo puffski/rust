@@ -8,12 +8,13 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// ignore-pretty : (#23623) problems when  ending with // comments
+
 // error-pattern:thread '<main>' panicked at 'attempted to negate with overflow'
 // compile-flags: -C debug-assertions
 
-// (Work around constant-evaluation)
-fn value() -> i8 { std::i8::MIN }
-
+#![feature(rustc_attrs)]
+#[rustc_no_mir] // FIXME #29769 MIR overflow checking is TBD.
 fn main() {
-    let _x = -value();
+    let _x = -std::i8::MIN;
 }

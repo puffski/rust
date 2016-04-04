@@ -12,6 +12,7 @@ use target::Target;
 
 pub fn target() -> Target {
     let mut base = super::openbsd_base::opts();
+    base.cpu = "x86-64".to_string();
     base.pre_link_args.push("-m64".to_string());
 
     Target {
@@ -21,6 +22,7 @@ pub fn target() -> Target {
         arch: "x86_64".to_string(),
         target_os: "openbsd".to_string(),
         target_env: "".to_string(),
+        target_vendor: "unknown".to_string(),
         options: base,
     }
 }

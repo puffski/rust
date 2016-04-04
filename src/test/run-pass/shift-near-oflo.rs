@@ -13,12 +13,21 @@
 // Check that we do *not* overflow on a number of edge cases.
 // (compare with test/run-fail/overflowing-{lsh,rsh}*.rs)
 
-// (Work around constant-evaluation)
-fn id<T>(x: T) -> T { x }
-
 fn main() {
     test_left_shift();
     test_right_shift();
+}
+
+pub static mut HACK: i32 = 0;
+
+// Work around constant-evaluation
+// The point of this test is to exercise the code generated for execution at runtime,
+// `id` can never be flagged as a const fn by future aggressive analyses...
+// due to the modification of the static
+#[inline(never)]
+fn id<T>(x: T) -> T {
+    unsafe { HACK += 1; }
+    x
 }
 
 fn test_left_shift() {

@@ -15,8 +15,10 @@
 
 use prelude::v1::*;
 
-use str::FromStr;
+use error::Error;
+use fmt;
 use net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use str::FromStr;
 
 struct Parser<'a> {
     // parsing as ASCII, so can use byte array
@@ -64,9 +66,8 @@ impl<'a> Parser<'a> {
     fn read_or<T>(&mut self, parsers: &mut [Box<FnMut(&mut Parser) -> Option<T> + 'static>])
                -> Option<T> {
         for pf in parsers {
-            match self.read_atomically(|p: &mut Parser| pf(p)) {
-                Some(r) => return Some(r),
-                None => {}
+            if let Some(r) = self.read_atomically(|p: &mut Parser| pf(p)) {
+                return Some(r);
             }
         }
         None
@@ -190,8 +191,8 @@ impl<'a> Parser<'a> {
         fn ipv6_addr_from_head_tail(head: &[u16], tail: &[u16]) -> Ipv6Addr {
             assert!(head.len() + tail.len() <= 8);
             let mut gs = [0; 8];
-            gs.clone_from_slice(head);
-            gs[(8 - tail.len()) .. 8].clone_from_slice(tail);
+            gs[..head.len()].copy_from_slice(head);
+            gs[(8 - tail.len()) .. 8].copy_from_slice(tail);
             Ipv6Addr::new(gs[0], gs[1], gs[2], gs[3], gs[4], gs[5], gs[6], gs[7])
         }
 
@@ -260,34 +261,46 @@ impl<'a> Parser<'a> {
     }
 
     fn read_ip_addr(&mut self) -> Option<IpAddr> {
-        let ipv4_addr = |p: &mut Parser| p.read_ipv4_addr().map(|v4| IpAddr::V4(v4));
-        let ipv6_addr = |p: &mut Parser| p.read_ipv6_addr().map(|v6| IpAddr::V6(v6));
+        let ipv4_addr = |p: &mut Parser| p.read_ipv4_addr().map(IpAddr::V4);
+        let ipv6_addr = |p: &mut Parser| p.read_ipv6_addr().map(IpAddr::V6);
         self.read_or(&mut [Box::new(ipv4_addr), Box::new(ipv6_addr)])
     }
 
-    fn read_socket_addr(&mut self) -> Option<SocketAddr> {
+    fn read_socket_addr_v4(&mut self) -> Option<SocketAddrV4> {
+        let ip_addr = |p: &mut Parser| p.read_ipv4_addr();
+        let colon = |p: &mut Parser| p.read_given_char(':');
+        let port = |p: &mut Parser| {
+            p.read_number(10, 5, 0x10000).map(|n| n as u16)
+        };
+
+        self.read_seq_3(ip_addr, colon, port).map(|t| {
+            let (ip, _, port): (Ipv4Addr, char, u16) = t;
+            SocketAddrV4::new(ip, port)
+        })
+    }
+
+    fn read_socket_addr_v6(&mut self) -> Option<SocketAddrV6> {
         let ip_addr = |p: &mut Parser| {
-            let ipv4_p = |p: &mut Parser| p.read_ip_addr();
-            let ipv6_p = |p: &mut Parser| {
-                let open_br = |p: &mut Parser| p.read_given_char('[');
-                let ip_addr = |p: &mut Parser| p.read_ipv6_addr();
-                let clos_br = |p: &mut Parser| p.read_given_char(']');
-                p.read_seq_3::<char, Ipv6Addr, char, _, _, _>(open_br, ip_addr, clos_br)
-                        .map(|t| match t { (_, ip, _) => IpAddr::V6(ip) })
-            };
-            p.read_or(&mut [Box::new(ipv4_p), Box::new(ipv6_p)])
+            let open_br = |p: &mut Parser| p.read_given_char('[');
+            let ip_addr = |p: &mut Parser| p.read_ipv6_addr();
+            let clos_br = |p: &mut Parser| p.read_given_char(']');
+            p.read_seq_3(open_br, ip_addr, clos_br).map(|t| t.1)
         };
         let colon = |p: &mut Parser| p.read_given_char(':');
-        let port  = |p: &mut Parser| p.read_number(10, 5, 0x10000).map(|n| n as u16);
+        let port = |p: &mut Parser| {
+            p.read_number(10, 5, 0x10000).map(|n| n as u16)
+        };
 
-        // host, colon, port
         self.read_seq_3(ip_addr, colon, port).map(|t| {
-            let (ip, _, port): (IpAddr, char, u16) = t;
-            match ip {
-                IpAddr::V4(ip) => SocketAddr::V4(SocketAddrV4::new(ip, port)),
-                IpAddr::V6(ip) => SocketAddr::V6(SocketAddrV6::new(ip, port, 0, 0)),
-            }
+            let (ip, _, port): (Ipv6Addr, char, u16) = t;
+            SocketAddrV6::new(ip, port, 0, 0)
         })
+    }
+
+    fn read_socket_addr(&mut self) -> Option<SocketAddr> {
+        let v4 = |p: &mut Parser| p.read_socket_addr_v4().map(SocketAddr::V4);
+        let v6 = |p: &mut Parser| p.read_socket_addr_v6().map(SocketAddr::V6);
+        self.read_or(&mut [Box::new(v4), Box::new(v6)])
     }
 }
 
@@ -324,6 +337,28 @@ impl FromStr for Ipv6Addr {
     }
 }
 
+#[stable(feature = "socket_addr_from_str", since = "1.5.0")]
+impl FromStr for SocketAddrV4 {
+    type Err = AddrParseError;
+    fn from_str(s: &str) -> Result<SocketAddrV4, AddrParseError> {
+        match Parser::new(s).read_till_eof(|p| p.read_socket_addr_v4()) {
+            Some(s) => Ok(s),
+            None => Err(AddrParseError(())),
+        }
+    }
+}
+
+#[stable(feature = "socket_addr_from_str", since = "1.5.0")]
+impl FromStr for SocketAddrV6 {
+    type Err = AddrParseError;
+    fn from_str(s: &str) -> Result<SocketAddrV6, AddrParseError> {
+        match Parser::new(s).read_till_eof(|p| p.read_socket_addr_v6()) {
+            Some(s) => Ok(s),
+            None => Err(AddrParseError(())),
+        }
+    }
+}
+
 #[stable(feature = "rust1", since = "1.0.0")]
 impl FromStr for SocketAddr {
     type Err = AddrParseError;
@@ -339,3 +374,17 @@ impl FromStr for SocketAddr {
 #[stable(feature = "rust1", since = "1.0.0")]
 #[derive(Debug, Clone, PartialEq)]
 pub struct AddrParseError(());
+
+#[stable(feature = "addr_parse_error_error", since = "1.4.0")]
+impl fmt::Display for AddrParseError {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        fmt.write_str(self.description())
+    }
+}
+
+#[stable(feature = "addr_parse_error_error", since = "1.4.0")]
+impl Error for AddrParseError {
+    fn description(&self) -> &str {
+        "invalid IP address syntax"
+    }
+}

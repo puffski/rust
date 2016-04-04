@@ -8,15 +8,12 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![allow(missing_docs)]
-#![allow(non_camel_case_types)]
-#![allow(non_snake_case)]
+#![allow(missing_docs, bad_style)]
 
 use prelude::v1::*;
 
 use ffi::{OsStr, OsString};
 use io::{self, ErrorKind};
-use libc;
 use num::Zero;
 use os::windows::ffi::{OsStrExt, OsStringExt};
 use path::PathBuf;
@@ -27,6 +24,7 @@ use time::Duration;
 pub mod backtrace;
 pub mod c;
 pub mod condvar;
+pub mod dynamic_lib;
 pub mod ext;
 pub mod fs;
 pub mod handle;
@@ -36,6 +34,7 @@ pub mod os;
 pub mod os_str;
 pub mod pipe;
 pub mod process;
+pub mod rand;
 pub mod rwlock;
 pub mod stack_overflow;
 pub mod thread;
@@ -43,38 +42,71 @@ pub mod thread_local;
 pub mod time;
 pub mod stdio;
 
-pub fn decode_error_kind(errno: i32) -> ErrorKind {
-    match errno as libc::c_int {
-        libc::ERROR_ACCESS_DENIED => ErrorKind::PermissionDenied,
-        libc::ERROR_ALREADY_EXISTS => ErrorKind::AlreadyExists,
-        libc::ERROR_BROKEN_PIPE => ErrorKind::BrokenPipe,
-        libc::ERROR_FILE_NOT_FOUND => ErrorKind::NotFound,
-        libc::ERROR_NO_DATA => ErrorKind::BrokenPipe,
-        libc::ERROR_OPERATION_ABORTED => ErrorKind::TimedOut,
+#[cfg(not(test))]
+pub fn init() {
+    ::alloc::oom::set_oom_handler(oom_handler);
 
-        libc::WSAEACCES => ErrorKind::PermissionDenied,
-        libc::WSAEADDRINUSE => ErrorKind::AddrInUse,
-        libc::WSAEADDRNOTAVAIL => ErrorKind::AddrNotAvailable,
-        libc::WSAECONNABORTED => ErrorKind::ConnectionAborted,
-        libc::WSAECONNREFUSED => ErrorKind::ConnectionRefused,
-        libc::WSAECONNRESET => ErrorKind::ConnectionReset,
-        libc::WSAEINVAL => ErrorKind::InvalidInput,
-        libc::WSAENOTCONN => ErrorKind::NotConnected,
-        libc::WSAEWOULDBLOCK => ErrorKind::WouldBlock,
-        libc::WSAETIMEDOUT => ErrorKind::TimedOut,
+    // See comment in sys/unix/mod.rs
+    fn oom_handler() -> ! {
+        use intrinsics;
+        use ptr;
+        let msg = "fatal runtime error: out of memory\n";
+        unsafe {
+            // WriteFile silently fails if it is passed an invalid handle, so
+            // there is no need to check the result of GetStdHandle.
+            c::WriteFile(c::GetStdHandle(c::STD_ERROR_HANDLE),
+                         msg.as_ptr() as c::LPVOID,
+                         msg.len() as c::DWORD,
+                         ptr::null_mut(),
+                         ptr::null_mut());
+            intrinsics::abort();
+        }
+    }
+}
+
+pub fn decode_error_kind(errno: i32) -> ErrorKind {
+    match errno as c::DWORD {
+        c::ERROR_ACCESS_DENIED => return ErrorKind::PermissionDenied,
+        c::ERROR_ALREADY_EXISTS => return ErrorKind::AlreadyExists,
+        c::ERROR_BROKEN_PIPE => return ErrorKind::BrokenPipe,
+        c::ERROR_FILE_NOT_FOUND => return ErrorKind::NotFound,
+        c::ERROR_PATH_NOT_FOUND => return ErrorKind::NotFound,
+        c::ERROR_NO_DATA => return ErrorKind::BrokenPipe,
+        c::ERROR_OPERATION_ABORTED => return ErrorKind::TimedOut,
+        _ => {}
+    }
+
+    match errno {
+        c::WSAEACCES => ErrorKind::PermissionDenied,
+        c::WSAEADDRINUSE => ErrorKind::AddrInUse,
+        c::WSAEADDRNOTAVAIL => ErrorKind::AddrNotAvailable,
+        c::WSAECONNABORTED => ErrorKind::ConnectionAborted,
+        c::WSAECONNREFUSED => ErrorKind::ConnectionRefused,
+        c::WSAECONNRESET => ErrorKind::ConnectionReset,
+        c::WSAEINVAL => ErrorKind::InvalidInput,
+        c::WSAENOTCONN => ErrorKind::NotConnected,
+        c::WSAEWOULDBLOCK => ErrorKind::WouldBlock,
+        c::WSAETIMEDOUT => ErrorKind::TimedOut,
 
         _ => ErrorKind::Other,
     }
 }
 
-fn to_utf16_os(s: &OsStr) -> Vec<u16> {
-    let mut v: Vec<_> = s.encode_wide().collect();
-    v.push(0);
-    v
+pub fn to_u16s<S: AsRef<OsStr>>(s: S) -> io::Result<Vec<u16>> {
+    fn inner(s: &OsStr) -> io::Result<Vec<u16>> {
+        let mut maybe_result: Vec<u16> = s.encode_wide().collect();
+        if maybe_result.iter().any(|&u| u == 0) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                                      "strings passed to WinAPI cannot contain NULs"));
+        }
+        maybe_result.push(0);
+        Ok(maybe_result)
+    }
+    inner(s.as_ref())
 }
 
-// Many Windows APIs follow a pattern of where we hand the a buffer and then
-// they will report back to us how large the buffer should be or how many bytes
+// Many Windows APIs follow a pattern of where we hand a buffer and then they
+// will report back to us how large the buffer should be or how many bytes
 // currently reside in the buffer. This function is an abstraction over these
 // functions by making them easier to call.
 //
@@ -88,7 +120,7 @@ fn to_utf16_os(s: &OsStr) -> Vec<u16> {
 // yielded the data which has been read from the syscall. The return value
 // from this closure is then the return value of the function.
 fn fill_utf16_buf<F1, F2, T>(mut f1: F1, f2: F2) -> io::Result<T>
-    where F1: FnMut(*mut u16, libc::DWORD) -> libc::DWORD,
+    where F1: FnMut(*mut u16, c::DWORD) -> c::DWORD,
           F2: FnOnce(&[u16]) -> T
 {
     // Start off with a stack buf but then spill over to the heap if we end up
@@ -117,13 +149,12 @@ fn fill_utf16_buf<F1, F2, T>(mut f1: F1, f2: F2) -> io::Result<T>
             // error" is still 0 then we interpret it as a 0 length buffer and
             // not an actual error.
             c::SetLastError(0);
-            let k = match f1(buf.as_mut_ptr(), n as libc::DWORD) {
-                0 if libc::GetLastError() == 0 => 0,
+            let k = match f1(buf.as_mut_ptr(), n as c::DWORD) {
+                0 if c::GetLastError() == 0 => 0,
                 0 => return Err(io::Error::last_os_error()),
                 n => n,
             } as usize;
-            if k == n && libc::GetLastError() ==
-                            libc::ERROR_INSUFFICIENT_BUFFER as libc::DWORD {
+            if k == n && c::GetLastError() == c::ERROR_INSUFFICIENT_BUFFER {
                 n *= 2;
             } else if k >= n {
                 n = k;
@@ -154,7 +185,7 @@ fn cvt<I: PartialEq + Zero>(i: I) -> io::Result<I> {
     }
 }
 
-fn dur2timeout(dur: Duration) -> libc::DWORD {
+fn dur2timeout(dur: Duration) -> c::DWORD {
     // Note that a duration is a (u64, u32) (seconds, nanoseconds) pair, and the
     // timeouts in windows APIs are typically u32 milliseconds. To translate, we
     // have two pieces to take care of:
@@ -162,25 +193,15 @@ fn dur2timeout(dur: Duration) -> libc::DWORD {
     // * Nanosecond precision is rounded up
     // * Greater than u32::MAX milliseconds (50 days) is rounded up to INFINITE
     //   (never time out).
-    dur.secs().checked_mul(1000).and_then(|ms| {
-        ms.checked_add((dur.extra_nanos() as u64) / 1_000_000)
+    dur.as_secs().checked_mul(1000).and_then(|ms| {
+        ms.checked_add((dur.subsec_nanos() as u64) / 1_000_000)
     }).and_then(|ms| {
-        ms.checked_add(if dur.extra_nanos() % 1_000_000 > 0 {1} else {0})
+        ms.checked_add(if dur.subsec_nanos() % 1_000_000 > 0 {1} else {0})
     }).map(|ms| {
-        if ms > <libc::DWORD>::max_value() as u64 {
-            libc::INFINITE
+        if ms > <c::DWORD>::max_value() as u64 {
+            c::INFINITE
         } else {
-            ms as libc::DWORD
+            ms as c::DWORD
         }
-    }).unwrap_or(libc::INFINITE)
-}
-
-fn ms_to_filetime(ms: u64) -> libc::FILETIME {
-    // A FILETIME is a count of 100 nanosecond intervals, so we multiply by
-    // 10000 b/c there are 10000 intervals in 1 ms
-    let ms = ms * 10000;
-    libc::FILETIME {
-        dwLowDateTime: ms as u32,
-        dwHighDateTime: (ms >> 32) as u32,
-    }
+    }).unwrap_or(c::INFINITE)
 }

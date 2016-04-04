@@ -14,72 +14,48 @@
 //!
 //! This API is completely unstable and subject to change.
 
-// Do not remove on snapshot creation. Needed for bootstrap. (Issue #22364)
-#![cfg_attr(stage0, feature(custom_attribute))]
 #![crate_name = "rustc"]
-#![unstable(feature = "rustc_private")]
-#![staged_api]
+#![unstable(feature = "rustc_private", issue = "27812")]
 #![crate_type = "dylib"]
 #![crate_type = "rlib"]
-#![doc(html_logo_url = "http://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
-      html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
-      html_root_url = "http://doc.rust-lang.org/nightly/")]
+#![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
+       html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
+       html_root_url = "https://doc.rust-lang.org/nightly/")]
+#![cfg_attr(not(stage0), deny(warnings))]
 
-#![feature(append)]
 #![feature(associated_consts)]
 #![feature(box_patterns)]
 #![feature(box_syntax)]
-#![feature(clone_from_slice)]
 #![feature(collections)]
 #![feature(const_fn)]
-#![feature(duration)]
-#![feature(duration_span)]
-#![feature(dynamic_lib)]
+#![feature(copy_from_slice)]
 #![feature(enumset)]
-#![feature(fs_canonicalize)]
-#![feature(hash_default)]
-#![feature(hashmap_hasher)]
-#![feature(into_cow)]
-#![feature(iter_cmp)]
 #![feature(iter_arith)]
 #![feature(libc)]
-#![feature(map_in_place)]
-#![feature(num_bits_bytes)]
-#![feature(path_ext)]
+#![feature(nonzero)]
 #![feature(quote)]
-#![feature(range_inclusive)]
-#![feature(ref_slice)]
 #![feature(rustc_diagnostic_macros)]
 #![feature(rustc_private)]
-#![feature(scoped_tls)]
-#![feature(slice_bytes)]
-#![feature(slice_splits)]
 #![feature(slice_patterns)]
-#![feature(slice_position_elem)]
-#![feature(slice_concat_ext)]
 #![feature(staged_api)]
 #![feature(str_char)]
-#![feature(str_match_indices)]
-#![feature(vec_push_all)]
-#![feature(wrapping)]
-#![feature(cell_extras)]
-#![feature(page_size)]
+#![feature(question_mark)]
 #![cfg_attr(test, feature(test))]
 
-#![allow(trivial_casts)]
-
 extern crate arena;
+extern crate core;
 extern crate flate;
 extern crate fmt_macros;
 extern crate getopts;
 extern crate graphviz;
 extern crate libc;
-extern crate rustc_llvm;
+extern crate rbml;
 extern crate rustc_back;
+extern crate rustc_front;
 extern crate rustc_data_structures;
 extern crate serialize;
-extern crate rbml;
 extern crate collections;
+extern crate rustc_const_math;
 #[macro_use] extern crate log;
 #[macro_use] extern crate syntax;
 #[macro_use] #[no_link] extern crate rustc_bitflags;
@@ -89,8 +65,6 @@ extern crate serialize as rustc_serialize; // used by deriving
 #[cfg(test)]
 extern crate test;
 
-pub use rustc_llvm as llvm;
-
 #[macro_use]
 mod macros;
 
@@ -99,36 +73,36 @@ mod macros;
 pub mod diagnostics;
 
 pub mod back {
-    pub use rustc_back::abi;
     pub use rustc_back::rpath;
     pub use rustc_back::svh;
 }
 
-pub mod ast_map;
+pub mod cfg;
+pub mod dep_graph;
+
+pub mod front {
+    pub mod check_attr;
+    pub mod map;
+}
+
+pub mod infer;
+pub mod lint;
 
 pub mod middle {
     pub mod astconv_util;
-    pub mod astencode;
-    pub mod cast;
-    pub mod cfg;
-    pub mod check_const;
-    pub mod check_static_recursion;
-    pub mod check_loop;
-    pub mod check_match;
-    pub mod check_rvalues;
-    pub mod const_eval;
+    pub mod expr_use_visitor; // STAGE0: increase glitch immunity
+    pub mod const_val;
+    pub mod const_qualif;
+    pub mod cstore;
     pub mod dataflow;
     pub mod dead;
     pub mod def;
+    pub mod def_id;
     pub mod dependency_format;
     pub mod effect;
     pub mod entry;
-    pub mod expr_use_visitor;
-    pub mod fast_reject;
     pub mod free_region;
     pub mod intrinsicck;
-    pub mod infer;
-    pub mod implicator;
     pub mod lang_items;
     pub mod liveness;
     pub mod mem_categorization;
@@ -139,23 +113,20 @@ pub mod middle {
     pub mod recursion_limit;
     pub mod resolve_lifetime;
     pub mod stability;
-    pub mod subst;
-    pub mod traits;
-    pub mod ty;
-    pub mod ty_fold;
-    pub mod ty_match;
-    pub mod ty_relate;
-    pub mod ty_walk;
     pub mod weak_lang_items;
 }
 
-pub mod metadata;
+pub mod mir {
+    pub mod repr;
+    pub mod tcx;
+    pub mod visit;
+    pub mod transform;
+    pub mod mir_map;
+}
 
 pub mod session;
-
-pub mod plugin;
-
-pub mod lint;
+pub mod traits;
+pub mod ty;
 
 pub mod util {
     pub use rustc_back::sha2;
@@ -163,13 +134,8 @@ pub mod util {
     pub mod common;
     pub mod ppaux;
     pub mod nodemap;
-    pub mod lev_distance;
     pub mod num;
     pub mod fs;
-}
-
-pub mod lib {
-    pub use llvm;
 }
 
 // A private module so that macro-expanded idents like
@@ -180,6 +146,19 @@ pub mod lib {
 mod rustc {
     pub use lint;
 }
+
+// FIXME(#27438): right now the unit tests of librustc don't refer to any actual
+//                functions generated in librustc_data_structures (all
+//                references are through generic functions), but statics are
+//                referenced from time to time. Due to this bug we won't
+//                actually correctly link in the statics unless we also
+//                reference a function, so be sure to reference a dummy
+//                function.
+#[test]
+fn noop() {
+    rustc_data_structures::__noop_fix_for_27438();
+}
+
 
 // Build the diagnostics array at the end so that the metadata includes error use sites.
 __build_diagnostic_array! { librustc, DIAGNOSTICS }

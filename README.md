@@ -1,27 +1,23 @@
 # The Rust Programming Language
 
-Rust is a fast systems programming language that guarantees
-memory safety and offers painless concurrency ([no data races]).
-It does not employ a garbage collector and has minimal runtime overhead.
+This is the main source code repository for [Rust]. It contains the compiler, standard library,
+and documentation.
 
-This repo contains the code for the compiler (`rustc`), as well
-as standard libraries, tools and documentation for Rust.
-
-[no data races]: http://blog.rust-lang.org/2015/04/10/Fearless-Concurrency.html
+[Rust]: https://www.rust-lang.org
 
 ## Quick Start
 
 Read ["Installing Rust"] from [The Book].
 
-["Installing Rust"]: http://doc.rust-lang.org/book/installing-rust.html
-[The Book]: http://doc.rust-lang.org/book/index.html
+["Installing Rust"]: https://doc.rust-lang.org/book/getting-started.html#installing-rust
+[The Book]: https://doc.rust-lang.org/book/index.html
 
 ## Building from Source
 
 1. Make sure you have installed the dependencies:
 
    * `g++` 4.7 or `clang++` 3.x
-   * `python` 2.6 or later (but not 3.x)
+   * `python` 2.7 (but not 3.x)
    * GNU `make` 3.81 or later
    * `curl`
    * `git`
@@ -57,6 +53,16 @@ Read ["Installing Rust"] from [The Book].
 
 ### Building on Windows
 
+There are two prominent ABIs in use on Windows: the native (MSVC) ABI used by
+Visual Studio, and the GNU ABI used by the GCC toolchain. Which version of Rust
+you need depends largely on what C/C++ libraries you want to interoperate with:
+for interop with software produced by Visual Studio use the MSVC build of Rust;
+for interop with GNU software built using the MinGW/MSYS2 toolchain use the GNU
+build.
+
+
+#### MinGW
+
 [MSYS2](http://msys2.github.io/) can be used to easily build Rust on Windows:
 
 1. Grab the latest MSYS2 installer and go through the installer.
@@ -65,9 +71,19 @@ Read ["Installing Rust"] from [The Book].
    tools.
 
    ```sh
-   # Choose one based on platform:
-   $ pacman -S mingw-w64-i686-toolchain
-   $ pacman -S mingw-w64-x86_64-toolchain
+   # Update package mirrors (may be needed if you have a fresh install of MSYS2)
+   $ pacman -Sy pacman-mirrors
+   ```
+
+Download [MinGW from
+here](http://mingw-w64.org/doku.php/download/mingw-builds), and choose the
+`version=4.9.x,threads=win32,exceptions=dwarf/seh` flavor when installing. Also, make sure to install to a path without spaces in it. After installing,
+add its `bin` directory to your `PATH`. This is due to [#28260](https://github.com/rust-lang/rust/issues/28260), in the future,
+installing from pacman should be just fine.
+
+   ```
+   # Make git available in MSYS2 (if not already available on path)
+   $ pacman -S git
 
    $ pacman -S base-devel
    ```
@@ -81,6 +97,41 @@ Read ["Installing Rust"] from [The Book].
    $ ./configure
    $ make && make install
    ```
+
+#### MSVC
+
+MSVC builds of Rust additionally require an installation of Visual Studio 2013
+(or later) so `rustc` can use its linker. Make sure to check the “C++ tools”
+option. In addition, `cmake` needs to be installed to build LLVM.
+
+With these dependencies installed, the build takes two steps:
+
+```sh
+$ ./configure
+$ make && make install
+```
+
+## Building Documentation
+
+If you’d like to build the documentation, it’s almost the same:
+
+```sh
+./configure
+$ make docs
+```
+
+Building the documentation requires building the compiler, so the above
+details will apply. Once you have the compiler built, you can
+
+```sh
+$ make docs NO_REBUILD=1
+```
+
+To make sure you don’t re-build the compiler because you made a change
+to some documentation.
+
+The generated documentation will appear in a top-level `doc` directory,
+created by the `make` rule.
 
 ## Notes
 
@@ -100,7 +151,7 @@ Snapshot binaries are currently built and tested on several platforms:
 You may find that other platforms work, but these are our officially
 supported build environments that are most likely to work.
 
-Rust currently needs about 1.5 GiB of RAM to build without swapping; if it hits
+Rust currently needs between 600MiB and 1.5GiB to build, depending on platform. If it hits
 swap, it will take a very long time to build.
 
 There is more advice about hacking on Rust in [CONTRIBUTING.md].
@@ -117,7 +168,7 @@ The Rust community congregates in a few places:
 
 [Stack Overflow]: http://stackoverflow.com/questions/tagged/rust
 [/r/rust]: http://reddit.com/r/rust
-[users.rust-lang.org]: http://users.rust-lang.org/
+[users.rust-lang.org]: https://users.rust-lang.org/
 
 ## Contributing
 
@@ -126,10 +177,11 @@ To contribute to Rust, please see [CONTRIBUTING](CONTRIBUTING.md).
 Rust has an [IRC] culture and most real-time collaboration happens in a
 variety of channels on Mozilla's IRC network, irc.mozilla.org. The
 most popular channel is [#rust], a venue for general discussion about
-Rust, and a good place to ask for help.
+Rust. And a good place to ask for help would be [#rust-beginners].
 
 [IRC]: https://en.wikipedia.org/wiki/Internet_Relay_Chat
 [#rust]: irc://irc.mozilla.org/rust
+[#rust-beginners]: irc://irc.mozilla.org/rust-beginners
 
 ## License
 

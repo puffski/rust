@@ -12,14 +12,15 @@
 
 #![crate_type="lib"]
 #![feature(staged_api)]
-#![staged_api]
+
+#![stable(feature = "test_feature", since = "1.0.0")]
 
 pub fn unmarked() {
     //~^ ERROR This node does not have a stability attribute
     ()
 }
 
-#[unstable(feature = "foo")]
+#[unstable(feature = "foo", issue = "0")]
 pub mod foo {
     // #[unstable] is inherited
     pub fn unmarked() {}

@@ -14,28 +14,41 @@
 extern crate libc;
 extern crate rustc;
 extern crate rustc_driver;
+extern crate rustc_front;
 extern crate rustc_lint;
+extern crate rustc_llvm as llvm;
+extern crate rustc_metadata;
 extern crate rustc_resolve;
-extern crate syntax;
+#[macro_use] extern crate syntax;
 
 use std::ffi::{CStr, CString};
 use std::mem::transmute;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::thread::Builder;
 
-use rustc::ast_map;
-use rustc::llvm;
-use rustc::metadata::cstore::RequireDynamic;
-use rustc::middle::ty;
+use rustc::dep_graph::DepGraph;
+use rustc::front::map as ast_map;
+use rustc::middle::cstore::{CrateStore, LinkagePreference};
+use rustc::ty;
 use rustc::session::config::{self, basic_options, build_configuration, Input, Options};
 use rustc::session::build_session;
-use rustc_driver::driver;
+use rustc_driver::{driver, abort_on_err};
+use rustc_front::lowering::{lower_crate, LoweringContext};
 use rustc_resolve::MakeGlobMap;
+use rustc_metadata::cstore::CStore;
 use libc::c_void;
 
 use syntax::diagnostics::registry::Registry;
+use syntax::parse::token;
 
 fn main() {
+    // Currently trips an assertion on i686-msvc, presumably because the support
+    // in LLVM is a little young.
+    if cfg!(target_env = "msvc") && cfg!(target_arch = "x86") {
+        return
+    }
+
     let program = r#"
     #[no_mangle]
     pub static TEST_STATIC: i32 = 42;
@@ -189,7 +202,7 @@ fn build_exec_options(sysroot: PathBuf) -> Options {
     opts.maybe_sysroot = Some(sysroot);
 
     // Prefer faster build time
-    opts.optimize = config::No;
+    opts.optimize = config::OptLevel::No;
 
     // Don't require a `main` function
     opts.crate_types = vec![config::CrateTypeDylib];
@@ -203,33 +216,42 @@ fn build_exec_options(sysroot: PathBuf) -> Options {
 /// for crates used in the given input.
 fn compile_program(input: &str, sysroot: PathBuf)
                    -> Option<(llvm::ModuleRef, Vec<PathBuf>)> {
-    let input = Input::Str(input.to_string());
+    let input = Input::Str {
+        name: driver::anon_src(),
+        input: input.to_string(),
+    };
     let thread = Builder::new().name("compile_program".to_string());
 
     let handle = thread.spawn(move || {
         let opts = build_exec_options(sysroot);
-        let sess = build_session(opts, None, Registry::new(&rustc::DIAGNOSTICS));
+        let cstore = Rc::new(CStore::new(token::get_ident_interner()));
+        let sess = build_session(opts, None, Registry::new(&rustc::DIAGNOSTICS),
+                                 cstore.clone());
         rustc_lint::register_builtins(&mut sess.lint_store.borrow_mut(), Some(&sess));
 
         let cfg = build_configuration(&sess);
 
         let id = "input".to_string();
 
-        let krate = driver::phase_1_parse_input(&sess, cfg, &input);
+        let krate = panictry!(driver::phase_1_parse_input(&sess, cfg, &input));
 
-        let krate = driver::phase_2_configure_and_expand(&sess, krate, &id, None)
+        let krate = driver::phase_2_configure_and_expand(&sess, &cstore, krate, &id, None)
             .expect("phase_2 returned `None`");
 
-        let mut forest = ast_map::Forest::new(krate);
+        let krate = driver::assign_node_ids(&sess, krate);
+        let lcx = LoweringContext::new(&sess, Some(&krate));
+        let dep_graph = DepGraph::new(sess.opts.build_dep_graph);
+        let mut hir_forest = ast_map::Forest::new(lower_crate(&lcx, &krate), dep_graph);
         let arenas = ty::CtxtArenas::new();
-        let ast_map = driver::assign_node_ids_and_map(&sess, &mut forest);
+        let ast_map = driver::make_map(&sess, &mut hir_forest);
 
-        driver::phase_3_run_analysis_passes(
-            sess, ast_map, &arenas, id, MakeGlobMap::No, |tcx, analysis| {
+        abort_on_err(driver::phase_3_run_analysis_passes(
+            &sess, &cstore, ast_map, &arenas, &id,
+            MakeGlobMap::No, |tcx, mir_map, analysis, _| {
 
-            let trans = driver::phase_4_translate_to_llvm(tcx, analysis);
+            let trans = driver::phase_4_translate_to_llvm(tcx, mir_map.unwrap(), analysis);
 
-            let crates = tcx.sess.cstore.get_used_crates(RequireDynamic);
+            let crates = tcx.sess.cstore.used_crates(LinkagePreference::RequireDynamic);
 
             // Collect crates used in the session.
             // Reverse order finds dependencies first.
@@ -243,7 +265,7 @@ fn compile_program(input: &str, sysroot: PathBuf)
             let modp = llmod as usize;
 
             (modp, deps)
-        }).1
+        }), &sess)
     }).unwrap();
 
     match handle.join() {

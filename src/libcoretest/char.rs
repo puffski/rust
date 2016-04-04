@@ -55,28 +55,24 @@ fn test_to_digit() {
 
 #[test]
 fn test_to_lowercase() {
-    fn lower(c: char) -> char {
-        let mut it = c.to_lowercase();
-        let c = it.next().unwrap();
-        // As of Unicode version 7.0.0, `SpecialCasing.txt` has no lower-case mapping
-        // to multiple code points.
-        assert!(it.next().is_none());
-        c
+    fn lower(c: char) -> Vec<char> {
+        c.to_lowercase().collect()
     }
-    assert_eq!(lower('A'), 'a');
-    assert_eq!(lower('Ö'), 'ö');
-    assert_eq!(lower('ß'), 'ß');
-    assert_eq!(lower('Ü'), 'ü');
-    assert_eq!(lower('💩'), '💩');
-    assert_eq!(lower('Σ'), 'σ');
-    assert_eq!(lower('Τ'), 'τ');
-    assert_eq!(lower('Ι'), 'ι');
-    assert_eq!(lower('Γ'), 'γ');
-    assert_eq!(lower('Μ'), 'μ');
-    assert_eq!(lower('Α'), 'α');
-    assert_eq!(lower('Σ'), 'σ');
-    assert_eq!(lower('ǅ'), 'ǆ');
-    assert_eq!(lower('ﬁ'), 'ﬁ');
+    assert_eq!(lower('A'), ['a']);
+    assert_eq!(lower('Ö'), ['ö']);
+    assert_eq!(lower('ß'), ['ß']);
+    assert_eq!(lower('Ü'), ['ü']);
+    assert_eq!(lower('💩'), ['💩']);
+    assert_eq!(lower('Σ'), ['σ']);
+    assert_eq!(lower('Τ'), ['τ']);
+    assert_eq!(lower('Ι'), ['ι']);
+    assert_eq!(lower('Γ'), ['γ']);
+    assert_eq!(lower('Μ'), ['μ']);
+    assert_eq!(lower('Α'), ['α']);
+    assert_eq!(lower('Σ'), ['σ']);
+    assert_eq!(lower('ǅ'), ['ǆ']);
+    assert_eq!(lower('ﬁ'), ['ﬁ']);
+    assert_eq!(lower('İ'), ['i', '\u{307}']);
 }
 
 #[test]
@@ -179,9 +175,10 @@ fn test_escape_unicode() {
 #[test]
 fn test_encode_utf8() {
     fn check(input: char, expect: &[u8]) {
-        let mut buf = [0; 4];
-        let n = input.encode_utf8(&mut buf).unwrap_or(0);
-        assert_eq!(&buf[..n], expect);
+        assert_eq!(input.encode_utf8().as_slice(), expect);
+        for (a, b) in input.encode_utf8().zip(expect) {
+            assert_eq!(a, *b);
+        }
     }
 
     check('x', &[0x78]);
@@ -193,9 +190,10 @@ fn test_encode_utf8() {
 #[test]
 fn test_encode_utf16() {
     fn check(input: char, expect: &[u16]) {
-        let mut buf = [0; 2];
-        let n = input.encode_utf16(&mut buf).unwrap_or(0);
-        assert_eq!(&buf[..n], expect);
+        assert_eq!(input.encode_utf16().as_slice(), expect);
+        for (a, b) in input.encode_utf16().zip(expect) {
+            assert_eq!(a, *b);
+        }
     }
 
     check('x', &[0x0078]);
@@ -212,30 +210,51 @@ fn test_len_utf16() {
     assert!('\u{1f4a9}'.len_utf16() == 2);
 }
 
-#[allow(deprecated)]
 #[test]
-fn test_width() {
-    assert_eq!('\x00'.width(false),Some(0));
-    assert_eq!('\x00'.width(true),Some(0));
-
-    assert_eq!('\x0A'.width(false),None);
-    assert_eq!('\x0A'.width(true),None);
-
-    assert_eq!('w'.width(false),Some(1));
-    assert_eq!('w'.width(true),Some(1));
-
-    assert_eq!('ｈ'.width(false),Some(2));
-    assert_eq!('ｈ'.width(true),Some(2));
-
-    assert_eq!('\u{AD}'.width(false),Some(1));
-    assert_eq!('\u{AD}'.width(true),Some(1));
-
-    assert_eq!('\u{1160}'.width(false),Some(0));
-    assert_eq!('\u{1160}'.width(true),Some(0));
-
-    assert_eq!('\u{a1}'.width(false),Some(1));
-    assert_eq!('\u{a1}'.width(true),Some(2));
-
-    assert_eq!('\u{300}'.width(false),Some(0));
-    assert_eq!('\u{300}'.width(true),Some(0));
+fn test_decode_utf16() {
+    fn check(s: &[u16], expected: &[Result<char, u16>]) {
+        assert_eq!(::std::char::decode_utf16(s.iter().cloned()).collect::<Vec<_>>(), expected);
+    }
+    check(&[0xD800, 0x41, 0x42], &[Err(0xD800), Ok('A'), Ok('B')]);
+    check(&[0xD800, 0], &[Err(0xD800), Ok('\0')]);
 }
+
+#[test]
+fn ed_iterator_specializations() {
+    // Check counting
+    assert_eq!('\n'.escape_default().count(), 2);
+    assert_eq!('c'.escape_default().count(), 1);
+    assert_eq!(' '.escape_default().count(), 1);
+    assert_eq!('\\'.escape_default().count(), 2);
+    assert_eq!('\''.escape_default().count(), 2);
+
+    // Check nth
+
+    // Check that OoB is handled correctly
+    assert_eq!('\n'.escape_default().nth(2), None);
+    assert_eq!('c'.escape_default().nth(1), None);
+    assert_eq!(' '.escape_default().nth(1), None);
+    assert_eq!('\\'.escape_default().nth(2), None);
+    assert_eq!('\''.escape_default().nth(2), None);
+
+    // Check the first char
+    assert_eq!('\n'.escape_default().nth(0), Some('\\'));
+    assert_eq!('c'.escape_default().nth(0), Some('c'));
+    assert_eq!(' '.escape_default().nth(0), Some(' '));
+    assert_eq!('\\'.escape_default().nth(0), Some('\\'));
+    assert_eq!('\''.escape_default().nth(0), Some('\\'));
+
+    // Check the second char
+    assert_eq!('\n'.escape_default().nth(1), Some('n'));
+    assert_eq!('\\'.escape_default().nth(1), Some('\\'));
+    assert_eq!('\''.escape_default().nth(1), Some('\''));
+
+    // Check the last char
+    assert_eq!('\n'.escape_default().last(), Some('n'));
+    assert_eq!('c'.escape_default().last(), Some('c'));
+    assert_eq!(' '.escape_default().last(), Some(' '));
+    assert_eq!('\\'.escape_default().last(), Some('\\'));
+    assert_eq!('\''.escape_default().last(), Some('\''));
+}
+
+

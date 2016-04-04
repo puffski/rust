@@ -8,18 +8,46 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![feature(libc)]
 
-use std::process::Command;
+extern crate libc;
+
+use std::process::{Command, ExitStatus};
 use std::env;
+
+#[link(name = "rust_test_helpers")]
+extern {
+    fn rust_get_null_ptr() -> *mut ::libc::c_char;
+}
+
+#[cfg(unix)]
+fn check_status(status: std::process::ExitStatus)
+{
+    use libc;
+    use std::os::unix::process::ExitStatusExt;
+
+    assert!(status.signal() == Some(libc::SIGSEGV)
+            || status.signal() == Some(libc::SIGBUS));
+}
+
+#[cfg(not(unix))]
+fn check_status(status: std::process::ExitStatus)
+{
+    assert!(!status.success());
+}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() > 1 && args[1] == "segfault" {
-        unsafe { *(0 as *mut isize) = 1 }; // trigger a segfault
+        unsafe { *rust_get_null_ptr() = 1; }; // trigger a segfault
     } else {
         let segfault = Command::new(&args[0]).arg("segfault").output().unwrap();
-        assert!(!segfault.status.success());
-        let error = String::from_utf8_lossy(&segfault.stderr);
-        assert!(!error.contains("has overflowed its stack"));
+        let stderr = String::from_utf8_lossy(&segfault.stderr);
+        let stdout = String::from_utf8_lossy(&segfault.stdout);
+        println!("stdout: {}", stdout);
+        println!("stderr: {}", stderr);
+        println!("status: {}", segfault.status);
+        check_status(segfault.status);
+        assert!(!stderr.contains("has overflowed its stack"));
     }
 }

@@ -14,23 +14,24 @@
 //! [def]: https://en.wikipedia.org/wiki/DEFLATE
 //! [mz]: https://code.google.com/p/miniz/
 
-// Do not remove on snapshot creation. Needed for bootstrap. (Issue #22364)
-#![cfg_attr(stage0, feature(custom_attribute))]
 #![crate_name = "flate"]
-#![unstable(feature = "rustc_private")]
-#![staged_api]
+#![unstable(feature = "rustc_private", issue = "27812")]
 #![crate_type = "rlib"]
 #![crate_type = "dylib"]
-#![doc(html_logo_url = "http://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
+#![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
-       html_root_url = "http://doc.rust-lang.org/nightly/")]
+       html_root_url = "https://doc.rust-lang.org/nightly/",
+       test(attr(deny(warnings))))]
+#![cfg_attr(not(stage0), deny(warnings))]
 
 #![feature(libc)]
 #![feature(staged_api)]
 #![feature(unique)]
-#![cfg_attr(test, feature(rustc_private, rand, vec_push_all))]
+#![cfg_attr(test, feature(rustc_private, rand))]
 
-#[cfg(test)] #[macro_use] extern crate log;
+#[cfg(test)]
+#[macro_use]
+extern crate log;
 
 extern crate libc;
 
@@ -47,9 +48,7 @@ pub struct Error {
 
 impl Error {
     fn new() -> Error {
-        Error {
-            _unused: (),
-        }
+        Error { _unused: () }
     }
 }
 
@@ -73,11 +72,16 @@ impl Deref for Bytes {
 
 impl Drop for Bytes {
     fn drop(&mut self) {
-        unsafe { libc::free(*self.ptr as *mut _); }
+        unsafe {
+            libc::free(*self.ptr as *mut _);
+        }
     }
 }
 
 #[link(name = "miniz", kind = "static")]
+#[cfg(not(cargobuild))]
+extern {}
+
 extern {
     /// Raw miniz compression function.
     fn tdefl_compress_mem_to_heap(psrc_buf: *const c_void,
@@ -123,7 +127,7 @@ pub fn deflate_bytes_zlib(bytes: &[u8]) -> Bytes {
     deflate_bytes_internal(bytes, LZ_NORM | TDEFL_WRITE_ZLIB_HEADER)
 }
 
-fn inflate_bytes_internal(bytes: &[u8], flags: c_int) -> Result<Bytes,Error> {
+fn inflate_bytes_internal(bytes: &[u8], flags: c_int) -> Result<Bytes, Error> {
     unsafe {
         let mut outsz: size_t = 0;
         let res = tinfl_decompress_mem_to_heap(bytes.as_ptr() as *const _,
@@ -142,12 +146,12 @@ fn inflate_bytes_internal(bytes: &[u8], flags: c_int) -> Result<Bytes,Error> {
 }
 
 /// Decompress a buffer, without parsing any sort of header on the input.
-pub fn inflate_bytes(bytes: &[u8]) -> Result<Bytes,Error> {
+pub fn inflate_bytes(bytes: &[u8]) -> Result<Bytes, Error> {
     inflate_bytes_internal(bytes, 0)
 }
 
 /// Decompress a buffer that starts with a zlib header.
-pub fn inflate_bytes_zlib(bytes: &[u8]) -> Result<Bytes,Error> {
+pub fn inflate_bytes_zlib(bytes: &[u8]) -> Result<Bytes, Error> {
     inflate_bytes_internal(bytes, TINFL_FLAG_PARSE_ZLIB_HEADER)
 }
 
@@ -169,14 +173,15 @@ mod tests {
         for _ in 0..20 {
             let mut input = vec![];
             for _ in 0..2000 {
-                input.push_all(r.choose(&words).unwrap());
+                input.extend_from_slice(r.choose(&words).unwrap());
             }
             debug!("de/inflate of {} bytes of random word-sequences",
                    input.len());
             let cmp = deflate_bytes(&input);
             let out = inflate_bytes(&cmp).unwrap();
             debug!("{} bytes deflated to {} ({:.1}% size)",
-                   input.len(), cmp.len(),
+                   input.len(),
+                   cmp.len(),
                    100.0 * ((cmp.len() as f64) / (input.len() as f64)));
             assert_eq!(&*input, &*out);
         }

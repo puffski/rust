@@ -12,10 +12,7 @@
 //! the standard library This varies per-platform, but these libraries are
 //! necessary for running libstd.
 
-// A few small shims in C that haven't been translated to Rust yet
-#[cfg(all(not(test), not(windows)))]
-#[link(name = "rust_builtin", kind = "static")]
-extern {}
+#![cfg(not(cargobuild))]
 
 // LLVM implements the `frem` instruction as a call to `fmod`, which lives in
 // libm. Hence, we must explicitly link to it.
@@ -42,6 +39,20 @@ extern {}
           target_os = "netbsd",
           target_os = "openbsd"))]
 #[link(name = "pthread")]
+extern {}
+
+#[cfg(target_os = "solaris")]
+#[link(name = "socket")]
+#[link(name = "posix4")]
+#[link(name = "pthread")]
+extern {}
+
+// For PNaCl targets, nacl_io is a Pepper wrapper for some IO functions
+// missing (ie always error) in Newlib.
+#[cfg(all(target_os = "nacl", not(test)))]
+#[link(name = "nacl_io", kind = "static")]
+#[link(name = "c++", kind = "static")] // for `nacl_io` and EH.
+#[link(name = "pthread", kind = "static")]
 extern {}
 
 #[cfg(target_os = "macos")]

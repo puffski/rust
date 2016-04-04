@@ -8,11 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use middle::infer::InferCtxt;
-use middle::traits::{self, FulfillmentContext, Normalized, MiscObligation,
+use rustc::infer::InferCtxt;
+use rustc::traits::{self, FulfillmentContext, Normalized, MiscObligation,
                      SelectionContext, ObligationCause};
-use middle::ty::HasTypeFlags;
-use middle::ty_fold::TypeFoldable;
+use rustc::ty::fold::TypeFoldable;
 use syntax::ast;
 use syntax::codemap::Span;
 
@@ -23,7 +22,7 @@ pub fn normalize_associated_types_in<'a,'tcx,T>(infcx: &InferCtxt<'a,'tcx>,
                                                 body_id: ast::NodeId,
                                                 value: &T)
                                                 -> T
-    where T : TypeFoldable<'tcx> + HasTypeFlags
+    where T : TypeFoldable<'tcx>
 {
     debug!("normalize_associated_types_in(value={:?})", value);
     let mut selcx = SelectionContext::new(infcx);

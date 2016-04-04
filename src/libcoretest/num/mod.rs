@@ -30,6 +30,8 @@ mod u32;
 mod u64;
 
 mod flt2dec;
+mod dec2flt;
+mod bignum;
 
 /// Helper function for testing numeric operations
 pub fn test_num<T>(ten: T, two: T) where
@@ -58,27 +60,6 @@ mod tests {
         assert_eq!(u, None);
         let s : Option<i16> = i16::from_str_radix("80000", 10).ok();
         assert_eq!(s, None);
-        let s = "10000000000000000000000000000000000000000";
-        let f : Option<f32> = f32::from_str_radix(s, 10).ok();
-        assert_eq!(f, Some(Float::infinity()));
-        let fe : Option<f32> = f32::from_str_radix("1e40", 10).ok();
-        assert_eq!(fe, Some(Float::infinity()));
-    }
-
-    #[test]
-    fn test_from_str_radix_float() {
-        let x1 : Option<f64> = f64::from_str_radix("-123.456", 10).ok();
-        assert_eq!(x1, Some(-123.456));
-        let x2 : Option<f32> = f32::from_str_radix("123.456", 10).ok();
-        assert_eq!(x2, Some(123.456));
-        let x3 : Option<f32> = f32::from_str_radix("-0.0", 10).ok();
-        assert_eq!(x3, Some(-0.0));
-        let x4 : Option<f32> = f32::from_str_radix("0.0", 10).ok();
-        assert_eq!(x4, Some(0.0));
-        let x4 : Option<f32> = f32::from_str_radix("1.0", 10).ok();
-        assert_eq!(x4, Some(1.0));
-        let x5 : Option<f32> = f32::from_str_radix("-1.0", 10).ok();
-        assert_eq!(x5, Some(-1.0));
     }
 
     #[test]
@@ -117,14 +98,119 @@ mod tests {
     }
 
     #[test]
+    fn test_leading_plus() {
+        assert_eq!("+127".parse::<u8>().ok(), Some(127));
+        assert_eq!("+9223372036854775807".parse::<i64>().ok(), Some(9223372036854775807));
+    }
+
+    #[test]
     fn test_invalid() {
         assert_eq!("--129".parse::<i8>().ok(), None);
+        assert_eq!("++129".parse::<i8>().ok(), None);
         assert_eq!("Съешь".parse::<u8>().ok(), None);
     }
 
     #[test]
     fn test_empty() {
         assert_eq!("-".parse::<i8>().ok(), None);
+        assert_eq!("+".parse::<i8>().ok(), None);
         assert_eq!("".parse::<u8>().ok(), None);
+    }
+
+    macro_rules! test_impl_from {
+        ($fn_name: ident, $Small: ty, $Large: ty) => {
+            #[test]
+            fn $fn_name() {
+                let small_max = <$Small>::max_value();
+                let small_min = <$Small>::min_value();
+                let large_max: $Large = small_max.into();
+                let large_min: $Large = small_min.into();
+                assert_eq!(large_max as $Small, small_max);
+                assert_eq!(large_min as $Small, small_min);
+            }
+        }
+    }
+
+    // Unsigned -> Unsigned
+    test_impl_from! { test_u8u16, u8, u16 }
+    test_impl_from! { test_u8u32, u8, u32 }
+    test_impl_from! { test_u8u64, u8, u64 }
+    test_impl_from! { test_u8usize, u8, usize }
+    test_impl_from! { test_u16u32, u16, u32 }
+    test_impl_from! { test_u16u64, u16, u64 }
+    test_impl_from! { test_u32u64, u32, u64 }
+
+    // Signed -> Signed
+    test_impl_from! { test_i8i16, i8, i16 }
+    test_impl_from! { test_i8i32, i8, i32 }
+    test_impl_from! { test_i8i64, i8, i64 }
+    test_impl_from! { test_i8isize, i8, isize }
+    test_impl_from! { test_i16i32, i16, i32 }
+    test_impl_from! { test_i16i64, i16, i64 }
+    test_impl_from! { test_i32i64, i32, i64 }
+
+    // Unsigned -> Signed
+    test_impl_from! { test_u8i16, u8, i16 }
+    test_impl_from! { test_u8i32, u8, i32 }
+    test_impl_from! { test_u8i64, u8, i64 }
+    test_impl_from! { test_u16i32, u16, i32 }
+    test_impl_from! { test_u16i64, u16, i64 }
+    test_impl_from! { test_u32i64, u32, i64 }
+
+    // Signed -> Float
+    test_impl_from! { test_i8f32, i8, f32 }
+    test_impl_from! { test_i8f64, i8, f64 }
+    test_impl_from! { test_i16f32, i16, f32 }
+    test_impl_from! { test_i16f64, i16, f64 }
+    test_impl_from! { test_i32f64, i32, f64 }
+
+    // Unsigned -> Float
+    test_impl_from! { test_u8f32, u8, f32 }
+    test_impl_from! { test_u8f64, u8, f64 }
+    test_impl_from! { test_u16f32, u16, f32 }
+    test_impl_from! { test_u16f64, u16, f64 }
+    test_impl_from! { test_u32f64, u32, f64 }
+
+    // Float -> Float
+    #[test]
+    fn test_f32f64() {
+        use core::f32;
+
+        let max: f64 = f32::MAX.into();
+        assert_eq!(max as f32, f32::MAX);
+        assert!(max.is_normal());
+
+        let min: f64 = f32::MIN.into();
+        assert_eq!(min as f32, f32::MIN);
+        assert!(min.is_normal());
+
+        let min_positive: f64 = f32::MIN_POSITIVE.into();
+        assert_eq!(min_positive as f32, f32::MIN_POSITIVE);
+        assert!(min_positive.is_normal());
+
+        let epsilon: f64 = f32::EPSILON.into();
+        assert_eq!(epsilon as f32, f32::EPSILON);
+        assert!(epsilon.is_normal());
+
+        let zero: f64 = (0.0f32).into();
+        assert_eq!(zero as f32, 0.0f32);
+        assert!(zero.is_sign_positive());
+
+        let neg_zero: f64 = (-0.0f32).into();
+        assert_eq!(neg_zero as f32, -0.0f32);
+        assert!(neg_zero.is_sign_negative());
+
+        let infinity: f64 = f32::INFINITY.into();
+        assert_eq!(infinity as f32, f32::INFINITY);
+        assert!(infinity.is_infinite());
+        assert!(infinity.is_sign_positive());
+
+        let neg_infinity: f64 = f32::NEG_INFINITY.into();
+        assert_eq!(neg_infinity as f32, f32::NEG_INFINITY);
+        assert!(neg_infinity.is_infinite());
+        assert!(neg_infinity.is_sign_negative());
+
+        let nan: f64 = f32::NAN.into();
+        assert!(nan.is_nan());
     }
 }

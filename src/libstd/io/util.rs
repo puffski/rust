@@ -10,8 +10,6 @@
 
 #![allow(missing_copy_implementations)]
 
-use prelude::v1::*;
-
 use io::{self, Read, Write, ErrorKind, BufRead};
 
 /// Copies the entire contents of a reader into a writer.
@@ -45,7 +43,9 @@ use io::{self, Read, Write, ErrorKind, BufRead};
 /// # }
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
-pub fn copy<R: Read, W: Write>(reader: &mut R, writer: &mut W) -> io::Result<u64> {
+pub fn copy<R: ?Sized, W: ?Sized>(reader: &mut R, writer: &mut W) -> io::Result<u64>
+    where R: Read, W: Write
+{
     let mut buf = [0; super::DEFAULT_BUF_SIZE];
     let mut written = 0;
     loop {
@@ -55,7 +55,7 @@ pub fn copy<R: Read, W: Write>(reader: &mut R, writer: &mut W) -> io::Result<u64
             Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         };
-        try!(writer.write_all(&buf[..len]));
+        writer.write_all(&buf[..len])?;
         written += len as u64;
     }
 }
@@ -105,7 +105,7 @@ impl BufRead for Empty {
 /// This struct is generally created by calling [`repeat()`][repeat]. Please
 /// see the documentation of `repeat()` for more details.
 ///
-/// [empty]: fn.repeat.html
+/// [repeat]: fn.repeat.html
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Repeat { byte: u8 }
 
@@ -131,7 +131,7 @@ impl Read for Repeat {
 /// This struct is generally created by calling [`sink()`][sink]. Please
 /// see the documentation of `sink()` for more details.
 ///
-/// [empty]: fn.sink.html
+/// [sink]: fn.sink.html
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Sink { _priv: () }
 
@@ -153,7 +153,17 @@ mod tests {
     use prelude::v1::*;
 
     use io::prelude::*;
-    use io::{sink, empty, repeat};
+    use io::{copy, sink, empty, repeat};
+
+    #[test]
+    fn copy_copies() {
+        let mut r = repeat(0).take(4);
+        let mut w = sink();
+        assert_eq!(copy(&mut r, &mut w).unwrap(), 4);
+
+        let mut r = repeat(0).take(1 << 17);
+        assert_eq!(copy(&mut r as &mut Read, &mut w as &mut Write).unwrap(), 1 << 17);
+    }
 
     #[test]
     fn sink_sinks() {
@@ -186,30 +196,5 @@ mod tests {
         assert_eq!(repeat(4).take(100).bytes().count(), 100);
         assert_eq!(repeat(4).take(100).bytes().next().unwrap().unwrap(), 4);
         assert_eq!(repeat(1).take(10).chain(repeat(2).take(10)).bytes().count(), 20);
-    }
-
-    #[test]
-    fn tee() {
-        let mut buf = [0; 10];
-        {
-            let mut ptr: &mut [u8] = &mut buf;
-            assert_eq!(repeat(4).tee(&mut ptr).take(5).read(&mut [0; 10]).unwrap(), 5);
-        }
-        assert_eq!(buf, [4, 4, 4, 4, 4, 0, 0, 0, 0, 0]);
-    }
-
-    #[test]
-    fn broadcast() {
-        let mut buf1 = [0; 10];
-        let mut buf2 = [0; 10];
-        {
-            let mut ptr1: &mut [u8] = &mut buf1;
-            let mut ptr2: &mut [u8] = &mut buf2;
-
-            assert_eq!((&mut ptr1).broadcast(&mut ptr2)
-                                  .write(&[1, 2, 3]).unwrap(), 3);
-        }
-        assert_eq!(buf1, buf2);
-        assert_eq!(buf1, [1, 2, 3, 0, 0, 0, 0, 0, 0, 0]);
     }
 }

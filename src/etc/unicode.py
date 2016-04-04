@@ -271,56 +271,23 @@ def load_properties(f, interestingprops):
 
     return props
 
-# load all widths of want_widths, except those in except_cats
-def load_east_asian_width(want_widths, except_cats):
-    f = "EastAsianWidth.txt"
-    fetch(f)
-    widths = {}
-    re1 = re.compile("^([0-9A-F]+);(\w+) +# (\w+)")
-    re2 = re.compile("^([0-9A-F]+)\.\.([0-9A-F]+);(\w+) +# (\w+)")
-
-    for line in fileinput.input(f):
-        width = None
-        d_lo = 0
-        d_hi = 0
-        cat = None
-        m = re1.match(line)
-        if m:
-            d_lo = m.group(1)
-            d_hi = m.group(1)
-            width = m.group(2)
-            cat = m.group(3)
-        else:
-            m = re2.match(line)
-            if m:
-                d_lo = m.group(1)
-                d_hi = m.group(2)
-                width = m.group(3)
-                cat = m.group(4)
-            else:
-                continue
-        if cat in except_cats or width not in want_widths:
-            continue
-        d_lo = int(d_lo, 16)
-        d_hi = int(d_hi, 16)
-        if width not in widths:
-            widths[width] = []
-        widths[width].append((d_lo, d_hi))
-    return widths
-
 def escape_char(c):
     return "'\\u{%x}'" % c if c != 0 else "'\\0'"
 
 def emit_bsearch_range_table(f):
     f.write("""
-fn bsearch_range_table(c: char, r: &'static [(char,char)]) -> bool {
+fn bsearch_range_table(c: char, r: &'static [(char, char)]) -> bool {
     use core::cmp::Ordering::{Equal, Less, Greater};
-    use core::slice::SliceExt;
-    r.binary_search_by(|&(lo,hi)| {
-        if lo <= c && c <= hi { Equal }
-        else if hi < c { Less }
-        else { Greater }
-    }).is_ok()
+    r.binary_search_by(|&(lo, hi)| {
+         if c < lo {
+             Greater
+         } else if hi < c {
+             Less
+         } else {
+             Equal
+         }
+     })
+     .is_ok()
 }\n
 """)
 
@@ -352,35 +319,25 @@ def emit_property_module(f, mod, tbl, emit):
 def emit_conversions_module(f, to_upper, to_lower, to_title):
     f.write("pub mod conversions {")
     f.write("""
-    use core::cmp::Ordering::{Equal, Less, Greater};
-    use core::slice::SliceExt;
     use core::option::Option;
     use core::option::Option::{Some, None};
-    use core::result::Result::{Ok, Err};
 
     pub fn to_lower(c: char) -> [char; 3] {
         match bsearch_case_table(c, to_lowercase_table) {
-          None        => [c, '\\0', '\\0'],
-          Some(index) => to_lowercase_table[index].1
+            None        => [c, '\\0', '\\0'],
+            Some(index) => to_lowercase_table[index].1,
         }
     }
 
     pub fn to_upper(c: char) -> [char; 3] {
         match bsearch_case_table(c, to_uppercase_table) {
             None        => [c, '\\0', '\\0'],
-            Some(index) => to_uppercase_table[index].1
+            Some(index) => to_uppercase_table[index].1,
         }
     }
 
     fn bsearch_case_table(c: char, table: &'static [(char, [char; 3])]) -> Option<usize> {
-        match table.binary_search_by(|&(key, _)| {
-            if c == key { Equal }
-            else if key < c { Less }
-            else { Greater }
-        }) {
-            Ok(i) => Some(i),
-            Err(_) => None,
-        }
+        table.binary_search_by(|&(key, _)| key.cmp(&c)).ok()
     }
 
 """)
@@ -393,88 +350,6 @@ def emit_conversions_module(f, to_upper, to_lower, to_title):
     emit_table(f, "to_uppercase_table",
         sorted(to_upper.iteritems(), key=operator.itemgetter(0)),
         is_pub=False, t_type = t_type, pfun=pfun)
-    f.write("}\n\n")
-
-def emit_grapheme_module(f, grapheme_table, grapheme_cats):
-    f.write("""pub mod grapheme {
-    use core::slice::SliceExt;
-    pub use self::GraphemeCat::*;
-    use core::result::Result::{Ok, Err};
-
-    #[allow(non_camel_case_types)]
-    #[derive(Clone, Copy)]
-    pub enum GraphemeCat {
-""")
-    for cat in grapheme_cats + ["Any"]:
-        f.write("        GC_" + cat + ",\n")
-    f.write("""    }
-
-    fn bsearch_range_value_table(c: char, r: &'static [(char, char, GraphemeCat)]) -> GraphemeCat {
-        use core::cmp::Ordering::{Equal, Less, Greater};
-        match r.binary_search_by(|&(lo, hi, _)| {
-            if lo <= c && c <= hi { Equal }
-            else if hi < c { Less }
-            else { Greater }
-        }) {
-            Ok(idx) => {
-                let (_, _, cat) = r[idx];
-                cat
-            }
-            Err(_) => GC_Any
-        }
-    }
-
-    pub fn grapheme_category(c: char) -> GraphemeCat {
-        bsearch_range_value_table(c, grapheme_cat_table)
-    }
-
-""")
-
-    emit_table(f, "grapheme_cat_table", grapheme_table, "&'static [(char, char, GraphemeCat)]",
-        pfun=lambda x: "(%s,%s,GC_%s)" % (escape_char(x[0]), escape_char(x[1]), x[2]),
-        is_pub=False)
-    f.write("}\n")
-
-def emit_charwidth_module(f, width_table):
-    f.write("pub mod charwidth {\n")
-    f.write("    use core::option::Option;\n")
-    f.write("    use core::option::Option::{Some, None};\n")
-    f.write("    use core::slice::SliceExt;\n")
-    f.write("    use core::result::Result::{Ok, Err};\n")
-    f.write("""
-    fn bsearch_range_value_table(c: char, is_cjk: bool, r: &'static [(char, char, u8, u8)]) -> u8 {
-        use core::cmp::Ordering::{Equal, Less, Greater};
-        match r.binary_search_by(|&(lo, hi, _, _)| {
-            if lo <= c && c <= hi { Equal }
-            else if hi < c { Less }
-            else { Greater }
-        }) {
-            Ok(idx) => {
-                let (_, _, r_ncjk, r_cjk) = r[idx];
-                if is_cjk { r_cjk } else { r_ncjk }
-            }
-            Err(_) => 1
-        }
-    }
-""")
-
-    f.write("""
-    pub fn width(c: char, is_cjk: bool) -> Option<usize> {
-        match c as usize {
-            _c @ 0 => Some(0),          // null is zero width
-            cu if cu < 0x20 => None,    // control sequences have no width
-            cu if cu < 0x7F => Some(1), // ASCII
-            cu if cu < 0xA0 => None,    // more control sequences
-            _ => Some(bsearch_range_value_table(c, is_cjk, charwidth_table) as usize)
-        }
-    }
-
-""")
-
-    f.write("    // character width table. Based on Markus Kuhn's free wcwidth() implementation,\n")
-    f.write("    //     http://www.cl.cam.ac.uk/~mgk25/ucs/wcwidth.c\n")
-    emit_table(f, "charwidth_table", width_table, "&'static [(char, char, u8, u8)]", is_pub=False,
-            pfun=lambda x: "(%s,%s,%s,%s)" % (escape_char(x[0]), escape_char(x[1]), x[2], x[3]))
     f.write("}\n\n")
 
 def emit_norm_module(f, canon, compat, combine, norm_props):
@@ -496,116 +371,6 @@ def emit_norm_module(f, canon, compat, combine, norm_props):
             canon_comp[decomp[0]].append( (decomp[1], char) )
     canon_comp_keys = canon_comp.keys()
     canon_comp_keys.sort()
-
-    f.write("pub mod normalization {\n")
-
-    def mkdata_fun(table):
-        def f(char):
-            data = "(%s,&[" % escape_char(char)
-            first = True
-            for d in table[char]:
-                if not first:
-                    data += ","
-                first = False
-                data += escape_char(d)
-            data += "])"
-            return data
-        return f
-
-    f.write("    // Canonical decompositions\n")
-    emit_table(f, "canonical_table", canon_keys, "&'static [(char, &'static [char])]",
-        pfun=mkdata_fun(canon))
-
-    f.write("    // Compatibility decompositions\n")
-    emit_table(f, "compatibility_table", compat_keys, "&'static [(char, &'static [char])]",
-        pfun=mkdata_fun(compat))
-
-    def comp_pfun(char):
-        data = "(%s,&[" % escape_char(char)
-        canon_comp[char].sort(lambda x, y: x[0] - y[0])
-        first = True
-        for pair in canon_comp[char]:
-            if not first:
-                data += ","
-            first = False
-            data += "(%s,%s)" % (escape_char(pair[0]), escape_char(pair[1]))
-        data += "])"
-        return data
-
-    f.write("    // Canonical compositions\n")
-    emit_table(f, "composition_table", canon_comp_keys,
-        "&'static [(char, &'static [(char, char)])]", pfun=comp_pfun)
-
-    f.write("""
-    fn bsearch_range_value_table(c: char, r: &'static [(char, char, u8)]) -> u8 {
-        use core::cmp::Ordering::{Equal, Less, Greater};
-        use core::slice::SliceExt;
-        use core::result::Result::{Ok, Err};
-        match r.binary_search_by(|&(lo, hi, _)| {
-            if lo <= c && c <= hi { Equal }
-            else if hi < c { Less }
-            else { Greater }
-        }) {
-            Ok(idx) => {
-                let (_, _, result) = r[idx];
-                result
-            }
-            Err(_) => 0
-        }
-    }\n
-""")
-
-    emit_table(f, "combining_class_table", combine, "&'static [(char, char, u8)]", is_pub=False,
-            pfun=lambda x: "(%s,%s,%s)" % (escape_char(x[0]), escape_char(x[1]), x[2]))
-
-    f.write("""    #[deprecated(reason = "use the crates.io `unicode-normalization` lib instead",
-                 since = "1.0.0")]
-    #[unstable(feature = "unicode",
-               reason = "this functionality will be moved to crates.io")]
-    pub fn canonical_combining_class(c: char) -> u8 {
-        bsearch_range_value_table(c, combining_class_table)
-    }
-
-}
-
-""")
-
-def remove_from_wtable(wtable, val):
-    wtable_out = []
-    while wtable:
-        if wtable[0][1] < val:
-            wtable_out.append(wtable.pop(0))
-        elif wtable[0][0] > val:
-            break
-        else:
-            (wt_lo, wt_hi, width, width_cjk) = wtable.pop(0)
-            if wt_lo == wt_hi == val:
-                continue
-            elif wt_lo == val:
-                wtable_out.append((wt_lo+1, wt_hi, width, width_cjk))
-            elif wt_hi == val:
-                wtable_out.append((wt_lo, wt_hi-1, width, width_cjk))
-            else:
-                wtable_out.append((wt_lo, val-1, width, width_cjk))
-                wtable_out.append((val+1, wt_hi, width, width_cjk))
-    if wtable:
-        wtable_out.extend(wtable)
-    return wtable_out
-
-
-
-def optimize_width_table(wtable):
-    wtable_out = []
-    w_this = wtable.pop(0)
-    while wtable:
-        if w_this[1] == wtable[0][0] - 1 and w_this[2:3] == wtable[0][2:3]:
-            w_tmp = wtable.pop(0)
-            w_this = (w_this[0], w_tmp[1], w_tmp[2], w_tmp[3])
-        else:
-            wtable_out.append(w_this)
-            w_this = wtable.pop(0)
-    wtable_out.append(w_this)
-    return wtable_out
 
 if __name__ == "__main__":
     r = "tables.rs"
@@ -633,7 +398,7 @@ pub const UNICODE_VERSION: (u64, u64, u64) = (%s, %s, %s);
         derived = load_properties("DerivedCoreProperties.txt", want_derived)
         scripts = load_properties("Scripts.txt", [])
         props = load_properties("PropList.txt",
-                ["White_Space", "Join_Control", "Noncharacter_Code_Point"])
+                ["White_Space", "Join_Control", "Noncharacter_Code_Point", "Pattern_White_Space"])
         norm_props = load_properties("DerivedNormalizationProps.txt",
                      ["Full_Composition_Exclusion"])
 
@@ -643,59 +408,9 @@ pub const UNICODE_VERSION: (u64, u64, u64) = (%s, %s, %s);
         # category tables
         for (name, cat, pfuns) in ("general_category", gencats, ["N", "Cc"]), \
                                   ("derived_property", derived, want_derived), \
-                                  ("property", props, ["White_Space"]):
+                                  ("property", props, ["White_Space", "Pattern_White_Space"]):
             emit_property_module(rf, name, cat, pfuns)
 
         # normalizations and conversions module
         emit_norm_module(rf, canon_decomp, compat_decomp, combines, norm_props)
         emit_conversions_module(rf, to_upper, to_lower, to_title)
-
-        ### character width module
-        width_table = []
-        for zwcat in ["Me", "Mn", "Cf"]:
-            width_table.extend(map(lambda (lo, hi): (lo, hi, 0, 0), gencats[zwcat]))
-        width_table.append((4448, 4607, 0, 0))
-
-        # get widths, except those that are explicitly marked zero-width above
-        ea_widths = load_east_asian_width(["W", "F", "A"], ["Me", "Mn", "Cf"])
-        # these are doublewidth
-        for dwcat in ["W", "F"]:
-            width_table.extend(map(lambda (lo, hi): (lo, hi, 2, 2), ea_widths[dwcat]))
-        width_table.extend(map(lambda (lo, hi): (lo, hi, 1, 2), ea_widths["A"]))
-
-        width_table.sort(key=lambda w: w[0])
-
-        # soft hyphen is not zero width in preformatted text; it's used to indicate
-        # a hyphen inserted to facilitate a linebreak.
-        width_table = remove_from_wtable(width_table, 173)
-
-        # optimize the width table by collapsing adjacent entities when possible
-        width_table = optimize_width_table(width_table)
-        emit_charwidth_module(rf, width_table)
-
-        ### grapheme cluster module
-        # from http://www.unicode.org/reports/tr29/#Grapheme_Cluster_Break_Property_Values
-        grapheme_cats = load_properties("auxiliary/GraphemeBreakProperty.txt", [])
-
-        # Control
-        #  Note 1:
-        # This category also includes Cs (surrogate codepoints), but Rust's `char`s are
-        # Unicode Scalar Values only, and surrogates are thus invalid `char`s.
-        # Thus, we have to remove Cs from the Control category
-        #  Note 2:
-        # 0x0a and 0x0d (CR and LF) are not in the Control category for Graphemes.
-        # However, the Graphemes iterator treats these as a special case, so they
-        # should be included in grapheme_cats["Control"] for our implementation.
-        grapheme_cats["Control"] = group_cat(list(
-            (set(ungroup_cat(grapheme_cats["Control"]))
-             | set(ungroup_cat(grapheme_cats["CR"]))
-             | set(ungroup_cat(grapheme_cats["LF"])))
-            - set(ungroup_cat([surrogate_codepoints]))))
-        del(grapheme_cats["CR"])
-        del(grapheme_cats["LF"])
-
-        grapheme_table = []
-        for cat in grapheme_cats:
-            grapheme_table.extend([(x, y, cat) for (x, y) in grapheme_cats[cat]])
-        grapheme_table.sort(key=lambda w: w[0])
-        emit_grapheme_module(rf, grapheme_table, grapheme_cats.keys())

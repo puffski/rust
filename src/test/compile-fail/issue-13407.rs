@@ -14,6 +14,7 @@ mod A {
 
 fn main() {
     A::C = 1;
-    //~^ ERROR: illegal left-hand side expression
+    //~^ ERROR: invalid left-hand side expression
     //~| ERROR: mismatched types
+    //~| ERROR: struct `C` is private
 }

@@ -8,12 +8,14 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// ignore-pretty : (#23623) problems when  ending with // comments
+
 // error-pattern:thread '<main>' panicked at 'arithmetic operation overflowed'
 // compile-flags: -C debug-assertions
 
-// (Work around constant-evaluation)
-fn value() -> u8 { 200 }
 
+#![feature(rustc_attrs)]
+#[rustc_no_mir] // FIXME #29769 MIR overflow checking is TBD.
 fn main() {
-    let _x = value() + value() + value();
+    let _x = 200u8 + 200u8 + 200u8;
 }

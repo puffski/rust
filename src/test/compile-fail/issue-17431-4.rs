@@ -11,7 +11,7 @@
 use std::marker;
 
 struct Foo<T> { foo: Option<Option<Foo<T>>>, marker: marker::PhantomData<T> }
-//~^ ERROR illegal recursive struct type; wrap the inner value in a box to make it representable
+//~^ ERROR recursive type `Foo` has infinite size
 
 impl<T> Foo<T> { fn bar(&self) {} }
 

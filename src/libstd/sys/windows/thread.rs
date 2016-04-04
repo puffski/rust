@@ -11,14 +11,13 @@
 use prelude::v1::*;
 
 use alloc::boxed::FnBox;
-use cmp;
 use io;
-use libc::{self, c_void, DWORD};
+use ffi::CStr;
 use mem;
+use libc::c_void;
 use ptr;
 use sys::c;
 use sys::handle::Handle;
-use sys_common::stack::RED_ZONE;
 use sys_common::thread::*;
 use time::Duration;
 
@@ -36,12 +35,10 @@ impl Thread {
         // PTHREAD_STACK_MIN bytes big.  Windows has no such lower limit, it's
         // just that below a certain threshold you can't do anything useful.
         // That threshold is application and architecture-specific, however.
-        // For now, the only requirement is that it's big enough to hold the
-        // red zone.  Round up to the next 64 kB because that's what the NT
-        // kernel does, might as well make it explicit.  With the current
-        // 20 kB red zone, that makes for a 64 kB minimum stack.
-        let stack_size = (cmp::max(stack, RED_ZONE) + 0xfffe) & (-0xfffe - 1);
-        let ret = c::CreateThread(ptr::null_mut(), stack_size as libc::size_t,
+        // Round up to the next 64 kB because that's what the NT kernel does,
+        // might as well make it explicit.
+        let stack_size = (stack + 0xfffe) & (!0xfffe);
+        let ret = c::CreateThread(ptr::null_mut(), stack_size,
                                   thread_start, &*p as *const _ as *mut _,
                                   0, ptr::null_mut());
 
@@ -52,14 +49,13 @@ impl Thread {
             Ok(Thread { handle: Handle::new(ret) })
         };
 
-        #[no_stack_check]
-        extern "system" fn thread_start(main: *mut libc::c_void) -> DWORD {
+        extern "system" fn thread_start(main: *mut c_void) -> c::DWORD {
             unsafe { start_thread(main); }
             0
         }
     }
 
-    pub fn set_name(_name: &str) {
+    pub fn set_name(_name: &CStr) {
         // Windows threads are nameless
         // The names in MSVC debugger are obtained using a "magic" exception,
         // which requires a use of MS C++ extensions.
@@ -67,8 +63,7 @@ impl Thread {
     }
 
     pub fn join(self) {
-        use libc::consts::os::extra::INFINITE;
-        unsafe { c::WaitForSingleObject(self.handle.raw(), INFINITE); }
+        unsafe { c::WaitForSingleObject(self.handle.raw(), c::INFINITE); }
     }
 
     pub fn yield_now() {
@@ -83,11 +78,14 @@ impl Thread {
             c::Sleep(super::dur2timeout(dur))
         }
     }
+
+    pub fn handle(&self) -> &Handle { &self.handle }
+
+    pub fn into_handle(self) -> Handle { self.handle }
 }
 
+#[cfg_attr(test, allow(dead_code))]
 pub mod guard {
-    use prelude::v1::*;
-
     pub unsafe fn current() -> Option<usize> { None }
     pub unsafe fn init() -> Option<usize> { None }
 }

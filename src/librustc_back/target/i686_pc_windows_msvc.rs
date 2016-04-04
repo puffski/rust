@@ -12,7 +12,16 @@ use target::Target;
 
 pub fn target() -> Target {
     let mut base = super::windows_msvc_base::opts();
-    base.cpu = "i686".to_string();
+    base.cpu = "pentium4".to_string();
+
+    // Mark all dynamic libraries and executables as compatible with the larger 4GiB address
+    // space available to x86 Windows binaries on x86_64.
+    base.pre_link_args.push("/LARGEADDRESSAWARE".to_string());
+
+    // Ensure the linker will only produce an image if it can also produce a table of
+    // the image's safe exception handlers.
+    // https://msdn.microsoft.com/en-us/library/9a89h429.aspx
+    base.pre_link_args.push("/SAFESEH".to_string());
 
     Target {
         llvm_target: "i686-pc-windows-msvc".to_string(),
@@ -21,6 +30,7 @@ pub fn target() -> Target {
         arch: "x86".to_string(),
         target_os: "windows".to_string(),
         target_env: "msvc".to_string(),
+        target_vendor: "pc".to_string(),
         options: base,
     }
 }

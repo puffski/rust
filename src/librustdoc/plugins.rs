@@ -8,15 +8,16 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![allow(deprecated)] // old path, used for compatibility with dynamic lib
+#![allow(deprecated)]
 
 use clean;
 
-use std::dynamic_lib as dl;
 use serialize::json;
 use std::mem;
 use std::string::String;
 use std::path::PathBuf;
+
+use rustc_back::dynamic_lib as dl;
 
 pub type PluginJson = Option<(String, json::Json)>;
 pub type PluginResult = (clean::Crate, PluginJson);

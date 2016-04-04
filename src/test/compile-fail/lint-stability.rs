@@ -16,7 +16,8 @@
 #![deny(deprecated)]
 #![allow(dead_code)]
 #![feature(staged_api)]
-#![staged_api]
+
+#![stable(feature = "rust1", since = "1.0.0")]
 
 #[macro_use]
 extern crate lint_stability;
@@ -127,7 +128,9 @@ mod cross_crate {
         <Foo>::trait_stable_text(&foo);
         <Foo as Trait>::trait_stable_text(&foo);
 
-        let _ = DeprecatedStruct { i: 0 }; //~ ERROR use of deprecated item
+        let _ = DeprecatedStruct { //~ ERROR use of deprecated item
+            i: 0 //~ ERROR use of deprecated item
+        };
         let _ = DeprecatedUnstableStruct {
             //~^ ERROR use of deprecated item
             //~^^ ERROR use of unstable library feature
@@ -224,8 +227,9 @@ mod cross_crate {
     struct S;
 
     impl UnstableTrait for S { } //~ ERROR use of unstable library feature
-
+    impl DeprecatedTrait for S {} //~ ERROR use of deprecated item: text
     trait LocalTrait : UnstableTrait { } //~ ERROR use of unstable library feature
+    trait LocalTrait2 : DeprecatedTrait { } //~ ERROR use of deprecated item: text
 
     impl Trait for S {
         fn trait_stable(&self) {}
@@ -257,72 +261,72 @@ mod inheritance {
 }
 
 mod this_crate {
-    #[unstable(feature = "test_feature")]
-    #[deprecated(since = "1.0.0")]
+    #[unstable(feature = "test_feature", issue = "0")]
+    #[rustc_deprecated(since = "1.0.0", reason = "text")]
     pub fn deprecated() {}
-    #[unstable(feature = "test_feature")]
-    #[deprecated(since = "1.0.0", reason = "text")]
+    #[unstable(feature = "test_feature", issue = "0")]
+    #[rustc_deprecated(since = "1.0.0", reason = "text")]
     pub fn deprecated_text() {}
 
-    #[unstable(feature = "test_feature")]
+    #[unstable(feature = "test_feature", issue = "0")]
     pub fn unstable() {}
-    #[unstable(feature = "test_feature", reason = "text")]
+    #[unstable(feature = "test_feature", reason = "text", issue = "0")]
     pub fn unstable_text() {}
 
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn stable() {}
-    #[stable(feature = "rust1", since = "1.0.0", reason = "text")]
+    #[stable(feature = "rust1", since = "1.0.0")]
     pub fn stable_text() {}
 
     #[stable(feature = "rust1", since = "1.0.0")]
     pub struct MethodTester;
 
     impl MethodTester {
-        #[unstable(feature = "test_feature")]
-        #[deprecated(since = "1.0.0")]
+        #[unstable(feature = "test_feature", issue = "0")]
+        #[rustc_deprecated(since = "1.0.0", reason = "text")]
         pub fn method_deprecated(&self) {}
-        #[unstable(feature = "test_feature")]
-        #[deprecated(since = "1.0.0", reason = "text")]
+        #[unstable(feature = "test_feature", issue = "0")]
+        #[rustc_deprecated(since = "1.0.0", reason = "text")]
         pub fn method_deprecated_text(&self) {}
 
-        #[unstable(feature = "test_feature")]
+        #[unstable(feature = "test_feature", issue = "0")]
         pub fn method_unstable(&self) {}
-        #[unstable(feature = "test_feature", reason = "text")]
+        #[unstable(feature = "test_feature", reason = "text", issue = "0")]
         pub fn method_unstable_text(&self) {}
 
         #[stable(feature = "rust1", since = "1.0.0")]
         pub fn method_stable(&self) {}
-        #[stable(feature = "rust1", since = "1.0.0", reason = "text")]
+        #[stable(feature = "rust1", since = "1.0.0")]
         pub fn method_stable_text(&self) {}
     }
 
     pub trait Trait {
-        #[unstable(feature = "test_feature")]
-        #[deprecated(since = "1.0.0")]
+        #[unstable(feature = "test_feature", issue = "0")]
+        #[rustc_deprecated(since = "1.0.0", reason = "text")]
         fn trait_deprecated(&self) {}
-        #[unstable(feature = "test_feature")]
-        #[deprecated(since = "1.0.0", reason = "text")]
+        #[unstable(feature = "test_feature", issue = "0")]
+        #[rustc_deprecated(since = "1.0.0", reason = "text")]
         fn trait_deprecated_text(&self) {}
 
-        #[unstable(feature = "test_feature")]
+        #[unstable(feature = "test_feature", issue = "0")]
         fn trait_unstable(&self) {}
-        #[unstable(feature = "test_feature", reason = "text")]
+        #[unstable(feature = "test_feature", reason = "text", issue = "0")]
         fn trait_unstable_text(&self) {}
 
         #[stable(feature = "rust1", since = "1.0.0")]
         fn trait_stable(&self) {}
-        #[stable(feature = "rust1", since = "1.0.0", reason = "text")]
+        #[stable(feature = "rust1", since = "1.0.0")]
         fn trait_stable_text(&self) {}
     }
 
     impl Trait for MethodTester {}
 
-    #[unstable(feature = "test_feature")]
-    #[deprecated(since = "1.0.0")]
+    #[unstable(feature = "test_feature", issue = "0")]
+    #[rustc_deprecated(since = "1.0.0", reason = "text")]
     pub struct DeprecatedStruct {
         #[stable(feature = "test_feature", since = "1.0.0")] i: isize
     }
-    #[unstable(feature = "test_feature")]
+    #[unstable(feature = "test_feature", issue = "0")]
     pub struct UnstableStruct {
         #[stable(feature = "test_feature", since = "1.0.0")] i: isize
     }
@@ -331,29 +335,29 @@ mod this_crate {
         #[stable(feature = "test_feature", since = "1.0.0")] i: isize
     }
 
-    #[unstable(feature = "test_feature")]
-    #[deprecated(since = "1.0.0")]
+    #[unstable(feature = "test_feature", issue = "0")]
+    #[rustc_deprecated(since = "1.0.0", reason = "text")]
     pub struct DeprecatedUnitStruct;
-    #[unstable(feature = "test_feature")]
+    #[unstable(feature = "test_feature", issue = "0")]
     pub struct UnstableUnitStruct;
     #[stable(feature = "rust1", since = "1.0.0")]
     pub struct StableUnitStruct;
 
     pub enum Enum {
-        #[unstable(feature = "test_feature")]
-        #[deprecated(since = "1.0.0")]
+        #[unstable(feature = "test_feature", issue = "0")]
+        #[rustc_deprecated(since = "1.0.0", reason = "text")]
         DeprecatedVariant,
-        #[unstable(feature = "test_feature")]
+        #[unstable(feature = "test_feature", issue = "0")]
         UnstableVariant,
 
         #[stable(feature = "rust1", since = "1.0.0")]
         StableVariant,
     }
 
-    #[unstable(feature = "test_feature")]
-    #[deprecated(since = "1.0.0")]
+    #[unstable(feature = "test_feature", issue = "0")]
+    #[rustc_deprecated(since = "1.0.0", reason = "text")]
     pub struct DeprecatedTupleStruct(isize);
-    #[unstable(feature = "test_feature")]
+    #[unstable(feature = "test_feature", issue = "0")]
     pub struct UnstableTupleStruct(isize);
     #[stable(feature = "rust1", since = "1.0.0")]
     pub struct StableTupleStruct(isize);
@@ -471,24 +475,24 @@ mod this_crate {
         foo.trait_stable();
     }
 
-    #[unstable(feature = "test_feature")]
-    #[deprecated(since = "1.0.0")]
+    #[unstable(feature = "test_feature", issue = "0")]
+    #[rustc_deprecated(since = "1.0.0", reason = "text")]
     fn test_fn_body() {
         fn fn_in_body() {}
-        fn_in_body();
+        fn_in_body(); //~ ERROR use of deprecated item: text
     }
 
     impl MethodTester {
-        #[unstable(feature = "test_feature")]
-        #[deprecated(since = "1.0.0")]
+        #[unstable(feature = "test_feature", issue = "0")]
+        #[rustc_deprecated(since = "1.0.0", reason = "text")]
         fn test_method_body(&self) {
             fn fn_in_body() {}
-            fn_in_body();
+            fn_in_body(); //~ ERROR use of deprecated item: text
         }
     }
 
-    #[unstable(feature = "test_feature")]
-    #[deprecated(since = "1.0.0")]
+    #[unstable(feature = "test_feature", issue = "0")]
+    #[rustc_deprecated(since = "1.0.0", reason = "text")]
     pub trait DeprecatedTrait {
         fn dummy(&self) { }
     }

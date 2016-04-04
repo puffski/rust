@@ -8,14 +8,17 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use core::prelude::*;
+#![unstable(reason = "not public", issue = "0", feature = "fd")]
 
-use io;
+use prelude::v1::*;
+
+use io::{self, Read};
 use libc::{self, c_int, size_t, c_void};
 use mem;
-use sys::c;
+use sync::atomic::{AtomicBool, Ordering};
 use sys::cvt;
 use sys_common::AsInner;
+use sys_common::io::read_to_end_uninitialized;
 
 pub struct FileDesc {
     fd: c_int,
@@ -36,28 +39,116 @@ impl FileDesc {
     }
 
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        let ret = try!(cvt(unsafe {
+        let ret = cvt(unsafe {
             libc::read(self.fd,
                        buf.as_mut_ptr() as *mut c_void,
                        buf.len() as size_t)
-        }));
+        })?;
         Ok(ret as usize)
+    }
+
+    pub fn read_to_end(&self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        let mut me = self;
+        (&mut me).read_to_end(buf)
     }
 
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
-        let ret = try!(cvt(unsafe {
+        let ret = cvt(unsafe {
             libc::write(self.fd,
                         buf.as_ptr() as *const c_void,
                         buf.len() as size_t)
-        }));
+        })?;
         Ok(ret as usize)
     }
 
+    #[cfg(not(any(target_env = "newlib", target_os = "solaris", target_os = "emscripten")))]
     pub fn set_cloexec(&self) {
         unsafe {
-            let ret = c::ioctl(self.fd, c::FIOCLEX);
+            let ret = libc::ioctl(self.fd, libc::FIOCLEX);
             debug_assert_eq!(ret, 0);
         }
+    }
+    #[cfg(any(target_env = "newlib", target_os = "solaris", target_os = "emscripten"))]
+    pub fn set_cloexec(&self) {
+        unsafe {
+            let previous = libc::fcntl(self.fd, libc::F_GETFD);
+            let ret = libc::fcntl(self.fd, libc::F_SETFD, previous | libc::FD_CLOEXEC);
+            debug_assert_eq!(ret, 0);
+        }
+    }
+
+    pub fn set_nonblocking(&self, nonblocking: bool) {
+        unsafe {
+            let previous = libc::fcntl(self.fd, libc::F_GETFL);
+            debug_assert!(previous != -1);
+            let new = if nonblocking {
+                previous | libc::O_NONBLOCK
+            } else {
+                previous & !libc::O_NONBLOCK
+            };
+            let ret = libc::fcntl(self.fd, libc::F_SETFL, new);
+            debug_assert!(ret != -1);
+        }
+    }
+
+    pub fn duplicate(&self) -> io::Result<FileDesc> {
+        // We want to atomically duplicate this file descriptor and set the
+        // CLOEXEC flag, and currently that's done via F_DUPFD_CLOEXEC. This
+        // flag, however, isn't supported on older Linux kernels (earlier than
+        // 2.6.24).
+        //
+        // To detect this and ensure that CLOEXEC is still set, we
+        // follow a strategy similar to musl [1] where if passing
+        // F_DUPFD_CLOEXEC causes `fcntl` to return EINVAL it means it's not
+        // supported (the third parameter, 0, is always valid), so we stop
+        // trying that.
+        //
+        // Also note that Android doesn't have F_DUPFD_CLOEXEC, but get it to
+        // resolve so we at least compile this.
+        //
+        // [1]: http://comments.gmane.org/gmane.linux.lib.musl.general/2963
+        #[cfg(target_os = "android")]
+        use libc::F_DUPFD as F_DUPFD_CLOEXEC;
+        #[cfg(not(target_os = "android"))]
+        use libc::F_DUPFD_CLOEXEC;
+
+        let make_filedesc = |fd| {
+            let fd = FileDesc::new(fd);
+            fd.set_cloexec();
+            fd
+        };
+        static TRY_CLOEXEC: AtomicBool =
+            AtomicBool::new(!cfg!(target_os = "android"));
+        let fd = self.raw();
+        if TRY_CLOEXEC.load(Ordering::Relaxed) {
+            match cvt(unsafe { libc::fcntl(fd, F_DUPFD_CLOEXEC, 0) }) {
+                // We *still* call the `set_cloexec` method as apparently some
+                // linux kernel at some point stopped setting CLOEXEC even
+                // though it reported doing so on F_DUPFD_CLOEXEC.
+                Ok(fd) => {
+                    return Ok(if cfg!(target_os = "linux") {
+                        make_filedesc(fd)
+                    } else {
+                        FileDesc::new(fd)
+                    })
+                }
+                Err(ref e) if e.raw_os_error() == Some(libc::EINVAL) => {
+                    TRY_CLOEXEC.store(false, Ordering::Relaxed);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        cvt(unsafe { libc::fcntl(fd, libc::F_DUPFD, 0) }).map(make_filedesc)
+    }
+}
+
+impl<'a> Read for &'a FileDesc {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        (**self).read(buf)
+    }
+
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        unsafe { read_to_end_uninitialized(self, buf) }
     }
 }
 

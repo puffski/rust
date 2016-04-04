@@ -10,7 +10,6 @@
 
 use std::collections::VecDeque;
 use std::fmt::Debug;
-use std::hash::{SipHasher, self};
 
 use test;
 
@@ -46,10 +45,6 @@ fn test_simple() {
     assert_eq!(d.len(), 3);
     d.push_front(1);
     assert_eq!(d.len(), 4);
-    debug!("{}", d[0]);
-    debug!("{}", d[1]);
-    debug!("{}", d[2]);
-    debug!("{}", d[3]);
     assert_eq!(d[0], 1);
     assert_eq!(d[1], 2);
     assert_eq!(d[2], 3);
@@ -476,7 +471,7 @@ fn test_drain() {
         let mut d: VecDeque<i32> = VecDeque::new();
 
         {
-            let mut iter = d.drain();
+            let mut iter = d.drain(..);
 
             assert_eq!(iter.size_hint(), (0, Some(0)));
             assert_eq!(iter.next(), None);
@@ -493,7 +488,7 @@ fn test_drain() {
             d.push_back(i);
         }
 
-        assert_eq!(d.drain().collect::<Vec<_>>(), [0, 1, 2, 3, 4]);
+        assert_eq!(d.drain(..).collect::<Vec<_>>(), [0, 1, 2, 3, 4]);
         assert!(d.is_empty());
     }
 
@@ -507,7 +502,7 @@ fn test_drain() {
             d.push_front(i);
         }
 
-        assert_eq!(d.drain().collect::<Vec<_>>(), [8,7,6,0,1,2,3,4]);
+        assert_eq!(d.drain(..).collect::<Vec<_>>(), [8,7,6,0,1,2,3,4]);
         assert!(d.is_empty());
     }
 
@@ -522,7 +517,7 @@ fn test_drain() {
         }
 
         {
-            let mut it = d.drain();
+            let mut it = d.drain(..);
             assert_eq!(it.size_hint(), (8, Some(8)));
             assert_eq!(it.next(), Some(8));
             assert_eq!(it.size_hint(), (7, Some(7)));
@@ -603,7 +598,53 @@ fn test_hash() {
   y.push_back(2);
   y.push_back(3);
 
-  assert!(hash::hash::<_, SipHasher>(&x) == hash::hash::<_, SipHasher>(&y));
+  assert!(::hash(&x) == ::hash(&y));
+}
+
+#[test]
+fn test_hash_after_rotation() {
+    // test that two deques hash equal even if elements are laid out differently
+    let len = 28;
+    let mut ring: VecDeque<i32> = (0..len as i32).collect();
+    let orig = ring.clone();
+    for _ in 0..ring.capacity() {
+        // shift values 1 step to the right by pop, sub one, push
+        ring.pop_front();
+        for elt in &mut ring {
+            *elt -= 1;
+        }
+        ring.push_back(len - 1);
+        assert_eq!(::hash(&orig), ::hash(&ring));
+        assert_eq!(orig, ring);
+        assert_eq!(ring, orig);
+    }
+}
+
+#[test]
+fn test_eq_after_rotation() {
+    // test that two deques are equal even if elements are laid out differently
+    let len = 28;
+    let mut ring: VecDeque<i32> = (0..len as i32).collect();
+    let mut shifted = ring.clone();
+    for _ in 0..10 {
+        // shift values 1 step to the right by pop, sub one, push
+        ring.pop_front();
+        for elt in &mut ring {
+            *elt -= 1;
+        }
+        ring.push_back(len - 1);
+    }
+
+    // try every shift
+    for _ in 0..shifted.capacity() {
+        shifted.pop_front();
+        for elt in &mut shifted {
+            *elt -= 1;
+        }
+        shifted.push_back(len - 1);
+        assert_eq!(shifted, ring);
+        assert_eq!(ring, shifted);
+    }
 }
 
 #[test]

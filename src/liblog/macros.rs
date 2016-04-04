@@ -19,6 +19,7 @@
 /// # Examples
 ///
 /// ```
+/// # #![feature(rustc_private)]
 /// #[macro_use] extern crate log;
 ///
 /// fn main() {
@@ -67,6 +68,7 @@ macro_rules! log {
 /// # Examples
 ///
 /// ```
+/// # #![feature(rustc_private)]
 /// #[macro_use] extern crate log;
 ///
 /// fn main() {
@@ -92,6 +94,7 @@ macro_rules! error {
 /// # Examples
 ///
 /// ```
+/// # #![feature(rustc_private)]
 /// #[macro_use] extern crate log;
 ///
 /// fn main() {
@@ -116,6 +119,7 @@ macro_rules! warn {
 /// # Examples
 ///
 /// ```
+/// # #![feature(rustc_private)]
 /// #[macro_use] extern crate log;
 ///
 /// fn main() {
@@ -135,13 +139,14 @@ macro_rules! info {
     ($($arg:tt)*) => (log!(::log::INFO, $($arg)*))
 }
 
-/// A convenience macro for logging at the debug log level. This macro can also
-/// be omitted at compile time by passing `-C debug-assertions` to the compiler. If
-/// this option is not passed, then debug statements will be compiled.
+/// A convenience macro for logging at the debug log level. This macro will
+/// be omitted at compile time in an optimized build unless `-C debug-assertions`
+/// is passed to the compiler.
 ///
 /// # Examples
 ///
 /// ```
+/// # #![feature(rustc_private)]
 /// #[macro_use] extern crate log;
 ///
 /// fn main() {
@@ -165,9 +170,10 @@ macro_rules! debug {
 /// # Examples
 ///
 /// ```
+/// # #![feature(rustc_private)]
 /// #[macro_use] extern crate log;
 ///
-/// struct Point { x: int, y: int }
+/// struct Point { x: i32, y: i32 }
 /// fn some_expensive_computation() -> Point { Point { x: 1, y: 2 } }
 ///
 /// fn main() {

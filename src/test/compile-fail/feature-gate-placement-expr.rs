@@ -19,9 +19,6 @@
 fn main() {
     use std::boxed::HEAP;
 
-    let x = box (HEAP) 'c'; //~ ERROR placement-in expression syntax is experimental
-    println!("x: {}", x);
-
-    let x = in HEAP { 'c' }; //~ ERROR placement-in expression syntax is experimental
+    let x = HEAP <- 'c'; //~ ERROR placement-in expression syntax is experimental
     println!("x: {}", x);
 }

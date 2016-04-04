@@ -48,7 +48,8 @@
 //! The path APIs are built around the notion of "components", which roughly
 //! correspond to the substrings between path separators (`/` and, on Windows,
 //! `\`). The APIs for path parsing are largely specified in terms of the path's
-//! components, so it's important to clearly understand how those are determined.
+//! components, so it's important to clearly understand how those are
+//! determined.
 //!
 //! A path can always be reconstructed into an *equivalent* path by
 //! putting together its components via `push`. Syntactically, the
@@ -98,17 +99,19 @@
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
-use core::prelude::*;
-
 use ascii::*;
-use borrow::{Borrow, IntoCow, ToOwned, Cow};
+use borrow::{Borrow, ToOwned, Cow};
 use cmp;
+use error::Error;
+use fmt;
+use fs;
+use hash::{Hash, Hasher};
+use io;
 use iter;
 use mem;
 use ops::{self, Deref};
 use string::String;
 use vec::Vec;
-use fmt;
 
 use ffi::{OsStr, OsString};
 
@@ -134,7 +137,6 @@ use self::platform::{is_sep_byte, is_verbatim_sep, MAIN_SEP_STR, parse_prefix};
 #[cfg(unix)]
 mod platform {
     use super::Prefix;
-    use core::prelude::*;
     use ffi::OsStr;
 
     #[inline]
@@ -157,7 +159,6 @@ mod platform {
 
 #[cfg(windows)]
 mod platform {
-    use core::prelude::*;
     use ascii::*;
 
     use super::{os_str_as_u8_slice, u8_slice_as_os_str, Prefix};
@@ -192,15 +193,14 @@ mod platform {
                         // \\?\UNC\server\share
                         path = &path[4..];
                         let (server, share) = match parse_two_comps(path, is_verbatim_sep) {
-                            Some((server, share)) => (u8_slice_as_os_str(server),
-                                                      u8_slice_as_os_str(share)),
-                            None => (u8_slice_as_os_str(path),
-                                     u8_slice_as_os_str(&[])),
+                            Some((server, share)) =>
+                                (u8_slice_as_os_str(server), u8_slice_as_os_str(share)),
+                            None => (u8_slice_as_os_str(path), u8_slice_as_os_str(&[])),
                         };
                         return Some(VerbatimUNC(server, share));
                     } else {
                         // \\?\path
-                        let idx = path.position_elem(&b'\\');
+                        let idx = path.iter().position(|&b| b == b'\\');
                         if idx == Some(2) && path[1] == b':' {
                             let c = path[0];
                             if c.is_ascii() && (c as char).is_alphabetic() {
@@ -208,24 +208,24 @@ mod platform {
                                 return Some(VerbatimDisk(c.to_ascii_uppercase()));
                             }
                         }
-                        let slice = &path[.. idx.unwrap_or(path.len())];
+                        let slice = &path[..idx.unwrap_or(path.len())];
                         return Some(Verbatim(u8_slice_as_os_str(slice)));
                     }
                 } else if path.starts_with(b".\\") {
                     // \\.\path
                     path = &path[2..];
-                    let slice = &path[.. path.position_elem(&b'\\').unwrap_or(path.len())];
+                    let pos = path.iter().position(|&b| b == b'\\');
+                    let slice = &path[..pos.unwrap_or(path.len())];
                     return Some(DeviceNS(u8_slice_as_os_str(slice)));
                 }
                 match parse_two_comps(path, is_sep_byte) {
                     Some((server, share)) if !server.is_empty() && !share.is_empty() => {
                         // \\server\share
-                        return Some(UNC(u8_slice_as_os_str(server),
-                                        u8_slice_as_os_str(share)));
+                        return Some(UNC(u8_slice_as_os_str(server), u8_slice_as_os_str(share)));
                     }
-                    _ => ()
+                    _ => (),
                 }
-            } else if path.len() > 1 && path[1] == b':' {
+            } else if path.get(1) == Some(& b':') {
                 // C:
                 let c = path[0];
                 if c.is_ascii() && (c as char).is_alphabetic() {
@@ -238,11 +238,11 @@ mod platform {
         fn parse_two_comps(mut path: &[u8], f: fn(u8) -> bool) -> Option<(&[u8], &[u8])> {
             let first = match path.iter().position(|x| f(*x)) {
                 None => return None,
-                Some(x) => &path[.. x]
+                Some(x) => &path[..x],
             };
-            path = &path[(first.len()+1)..];
+            path = &path[(first.len() + 1)..];
             let idx = path.iter().position(|x| f(*x));
-            let second = &path[.. idx.unwrap_or(path.len())];
+            let second = &path[..idx.unwrap_or(path.len())];
             Some((first, second))
         }
     }
@@ -267,27 +267,33 @@ mod platform {
 pub enum Prefix<'a> {
     /// Prefix `\\?\`, together with the given component immediately following it.
     #[stable(feature = "rust1", since = "1.0.0")]
-    Verbatim(&'a OsStr),
+    Verbatim(#[stable(feature = "rust1", since = "1.0.0")] &'a OsStr),
 
     /// Prefix `\\?\UNC\`, with the "server" and "share" components following it.
     #[stable(feature = "rust1", since = "1.0.0")]
-    VerbatimUNC(&'a OsStr, &'a OsStr),
+    VerbatimUNC(
+        #[stable(feature = "rust1", since = "1.0.0")] &'a OsStr,
+        #[stable(feature = "rust1", since = "1.0.0")] &'a OsStr,
+    ),
 
     /// Prefix like `\\?\C:\`, for the given drive letter
     #[stable(feature = "rust1", since = "1.0.0")]
-    VerbatimDisk(u8),
+    VerbatimDisk(#[stable(feature = "rust1", since = "1.0.0")] u8),
 
     /// Prefix `\\.\`, together with the given component immediately following it.
     #[stable(feature = "rust1", since = "1.0.0")]
-    DeviceNS(&'a OsStr),
+    DeviceNS(#[stable(feature = "rust1", since = "1.0.0")] &'a OsStr),
 
     /// Prefix `\\server\share`, with the given "server" and "share" components.
     #[stable(feature = "rust1", since = "1.0.0")]
-    UNC(&'a OsStr, &'a OsStr),
+    UNC(
+        #[stable(feature = "rust1", since = "1.0.0")] &'a OsStr,
+        #[stable(feature = "rust1", since = "1.0.0")] &'a OsStr,
+    ),
 
     /// Prefix `C:` for the given disk drive.
     #[stable(feature = "rust1", since = "1.0.0")]
-    Disk(u8),
+    Disk(#[stable(feature = "rust1", since = "1.0.0")] u8),
 }
 
 impl<'a> Prefix<'a> {
@@ -299,15 +305,25 @@ impl<'a> Prefix<'a> {
         }
         match *self {
             Verbatim(x) => 4 + os_str_len(x),
-            VerbatimUNC(x,y) => 8 + os_str_len(x) +
-                if os_str_len(y) > 0 { 1 + os_str_len(y) }
-                else { 0 },
+            VerbatimUNC(x, y) => {
+                8 + os_str_len(x) +
+                if os_str_len(y) > 0 {
+                    1 + os_str_len(y)
+                } else {
+                    0
+                }
+            },
             VerbatimDisk(_) => 6,
-            UNC(x,y) => 2 + os_str_len(x) +
-                if os_str_len(y) > 0 { 1 + os_str_len(y) }
-                else { 0 },
+            UNC(x, y) => {
+                2 + os_str_len(x) +
+                if os_str_len(y) > 0 {
+                    1 + os_str_len(y)
+                } else {
+                    0
+                }
+            },
             DeviceNS(x) => 4 + os_str_len(x),
-            Disk(_) => 2
+            Disk(_) => 2,
         }
 
     }
@@ -354,7 +370,6 @@ impl<'a> Prefix<'a> {
 /// ```
 #[stable(feature = "rust1", since = "1.0.0")]
 pub fn is_separator(c: char) -> bool {
-    use ascii::*;
     c.is_ascii() && is_sep_byte(c as u8)
 }
 
@@ -369,15 +384,16 @@ pub const MAIN_SEPARATOR: char = platform::MAIN_SEP;
 // Iterate through `iter` while it matches `prefix`; return `None` if `prefix`
 // is not a prefix of `iter`, otherwise return `Some(iter_after_prefix)` giving
 // `iter` after having exhausted `prefix`.
-fn iter_after<A, I, J>(mut iter: I, mut prefix: J) -> Option<I> where
-    I: Iterator<Item=A> + Clone, J: Iterator<Item=A>, A: PartialEq
+fn iter_after<A, I, J>(mut iter: I, mut prefix: J) -> Option<I>
+    where I: Iterator<Item = A> + Clone,
+          J: Iterator<Item = A>,
+          A: PartialEq
 {
     loop {
         let mut iter_next = iter.clone();
         match (iter_next.next(), prefix.next()) {
-            (Some(x), Some(y)) => {
-                if x != y { return None }
-            }
+            (Some(ref x), Some(ref y)) if x == y => (),
+            (Some(_), Some(_)) => return None,
             (Some(_), None) => return Some(iter),
             (None, None) => return Some(iter),
             (None, Some(_)) => return None,
@@ -400,15 +416,20 @@ unsafe fn u8_slice_as_os_str(s: &[u8]) -> &OsStr {
 
 /// Says whether the first byte after the prefix is a separator.
 fn has_physical_root(s: &[u8], prefix: Option<Prefix>) -> bool {
-    let path = if let Some(p) = prefix { &s[p.len()..] } else { s };
+    let path = if let Some(p) = prefix {
+        &s[p.len()..]
+    } else {
+        s
+    };
     !path.is_empty() && is_sep_byte(path[0])
 }
 
 // basic workhorse for splitting stem and extension
-#[allow(unused_unsafe)] // FIXME
 fn split_file_at_dot(file: &OsStr) -> (Option<&OsStr>, Option<&OsStr>) {
     unsafe {
-        if os_str_as_u8_slice(file) == b".." { return (Some(file), None) }
+        if os_str_as_u8_slice(file) == b".." {
+            return (Some(file), None);
+        }
 
         // The unsafety here stems from converting between &OsStr and &[u8]
         // and back. This is safe to do because (1) we only look at ASCII
@@ -449,7 +470,7 @@ enum State {
 ///
 /// Does not occur on Unix.
 #[stable(feature = "rust1", since = "1.0.0")]
-#[derive(Copy, Clone, Eq, Hash, Debug)]
+#[derive(Copy, Clone, Eq, Debug)]
 pub struct PrefixComponent<'a> {
     /// The prefix as an unparsed `OsStr` slice.
     raw: &'a OsStr,
@@ -493,6 +514,13 @@ impl<'a> cmp::Ord for PrefixComponent<'a> {
     }
 }
 
+#[stable(feature = "rust1", since = "1.0.0")]
+impl<'a> Hash for PrefixComponent<'a> {
+    fn hash<H: Hasher>(&self, h: &mut H) {
+        self.parsed.hash(h);
+    }
+}
+
 /// A single component of a path.
 ///
 /// See the module documentation for an in-depth explanation of components and
@@ -504,7 +532,9 @@ pub enum Component<'a> {
     ///
     /// Does not occur on Unix.
     #[stable(feature = "rust1", since = "1.0.0")]
-    Prefix(PrefixComponent<'a>),
+    Prefix(
+        #[stable(feature = "rust1", since = "1.0.0")] PrefixComponent<'a>
+    ),
 
     /// The root directory component, appears after any prefix and before anything else
     #[stable(feature = "rust1", since = "1.0.0")]
@@ -520,7 +550,7 @@ pub enum Component<'a> {
 
     /// A normal component, i.e. `a` and `b` in `a/b`
     #[stable(feature = "rust1", since = "1.0.0")]
-    Normal(&'a OsStr),
+    Normal(#[stable(feature = "rust1", since = "1.0.0")] &'a OsStr),
 }
 
 impl<'a> Component<'a> {
@@ -584,7 +614,7 @@ pub struct Components<'a> {
 #[derive(Clone)]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Iter<'a> {
-    inner: Components<'a>
+    inner: Components<'a>,
 }
 
 impl<'a> Components<'a> {
@@ -602,15 +632,26 @@ impl<'a> Components<'a> {
     /// how much of the prefix is left from the point of view of iteration?
     #[inline]
     fn prefix_remaining(&self) -> usize {
-        if self.front == State::Prefix { self.prefix_len() }
-        else { 0 }
+        if self.front == State::Prefix {
+            self.prefix_len()
+        } else {
+            0
+        }
     }
 
     // Given the iteration so far, how much of the pre-State::Body path is left?
     #[inline]
     fn len_before_body(&self) -> usize {
-        let root = if self.front <= State::StartDir && self.has_physical_root { 1 } else { 0 };
-        let cur_dir = if self.front <= State::StartDir && self.include_cur_dir() { 1 } else { 0 };
+        let root = if self.front <= State::StartDir && self.has_physical_root {
+            1
+        } else {
+            0
+        };
+        let cur_dir = if self.front <= State::StartDir && self.include_cur_dir() {
+            1
+        } else {
+            0
+        };
         self.prefix_remaining() + root + cur_dir
     }
 
@@ -636,35 +677,47 @@ impl<'a> Components<'a> {
     /// ```
     /// use std::path::Path;
     ///
-    /// let path = Path::new("/tmp/foo/bar.txt");
+    /// let mut components = Path::new("/tmp/foo/bar.txt").components();
+    /// components.next();
+    /// components.next();
     ///
-    /// println!("{:?}", path.components().as_path());
+    /// assert_eq!(Path::new("foo/bar.txt"), components.as_path());
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn as_path(&self) -> &'a Path {
         let mut comps = self.clone();
-        if comps.front == State::Body { comps.trim_left(); }
-        if comps.back == State::Body { comps.trim_right(); }
+        if comps.front == State::Body {
+            comps.trim_left();
+        }
+        if comps.back == State::Body {
+            comps.trim_right();
+        }
         unsafe { Path::from_u8_slice(comps.path) }
     }
 
     /// Is the *original* path rooted?
     fn has_root(&self) -> bool {
-        if self.has_physical_root { return true }
+        if self.has_physical_root {
+            return true;
+        }
         if let Some(p) = self.prefix {
-            if p.has_implicit_root() { return true }
+            if p.has_implicit_root() {
+                return true;
+            }
         }
         false
     }
 
     /// Should the normalized path include a leading . ?
     fn include_cur_dir(&self) -> bool {
-        if self.has_root() { return false }
+        if self.has_root() {
+            return false;
+        }
         let mut iter = self.path[self.prefix_len()..].iter();
         match (iter.next(), iter.next()) {
             (Some(&b'.'), None) => true,
             (Some(&b'.'), Some(&b)) => self.is_sep_byte(b),
-            _ => false
+            _ => false,
         }
     }
 
@@ -677,7 +730,7 @@ impl<'a> Components<'a> {
                           // separately via `include_cur_dir`
             b".." => Some(Component::ParentDir),
             b"" => None,
-            _ => Some(Component::Normal(unsafe { u8_slice_as_os_str(comp) }))
+            _ => Some(Component::Normal(unsafe { u8_slice_as_os_str(comp) })),
         }
     }
 
@@ -687,7 +740,7 @@ impl<'a> Components<'a> {
         debug_assert!(self.front == State::Body);
         let (extra, comp) = match self.path.iter().position(|b| self.is_sep_byte(*b)) {
             None => (0, self.path),
-            Some(i) => (1, &self.path[.. i]),
+            Some(i) => (1, &self.path[..i]),
         };
         (comp.len() + extra, self.parse_single_component(comp))
     }
@@ -698,8 +751,8 @@ impl<'a> Components<'a> {
         debug_assert!(self.back == State::Body);
         let start = self.len_before_body();
         let (extra, comp) = match self.path[start..].iter().rposition(|b| self.is_sep_byte(*b)) {
-            None => (0, &self.path[start ..]),
-            Some(i) => (1, &self.path[start + i + 1 ..]),
+            None => (0, &self.path[start..]),
+            Some(i) => (1, &self.path[start + i + 1..]),
         };
         (comp.len() + extra, self.parse_single_component(comp))
     }
@@ -711,7 +764,7 @@ impl<'a> Components<'a> {
             if comp.is_some() {
                 return;
             } else {
-                self.path = &self.path[size ..];
+                self.path = &self.path[size..];
             }
         }
     }
@@ -723,15 +776,9 @@ impl<'a> Components<'a> {
             if comp.is_some() {
                 return;
             } else {
-                self.path = &self.path[.. self.path.len() - size];
+                self.path = &self.path[..self.path.len() - size];
             }
         }
-    }
-
-    /// Examine the next component without consuming it.
-    #[unstable(feature = "path_components_peek")]
-    pub fn peek(&self) -> Option<Component<'a>> {
-        self.clone().next()
     }
 }
 
@@ -797,12 +844,12 @@ impl<'a> Iterator for Components<'a> {
                 State::Prefix if self.prefix_len() > 0 => {
                     self.front = State::StartDir;
                     debug_assert!(self.prefix_len() <= self.path.len());
-                    let raw = &self.path[.. self.prefix_len()];
-                    self.path = &self.path[self.prefix_len() .. ];
+                    let raw = &self.path[..self.prefix_len()];
+                    self.path = &self.path[self.prefix_len()..];
                     return Some(Component::Prefix(PrefixComponent {
                         raw: unsafe { u8_slice_as_os_str(raw) },
-                        parsed: self.prefix.unwrap()
-                    }))
+                        parsed: self.prefix.unwrap(),
+                    }));
                 }
                 State::Prefix => {
                     self.front = State::StartDir;
@@ -812,26 +859,28 @@ impl<'a> Iterator for Components<'a> {
                     if self.has_physical_root {
                         debug_assert!(!self.path.is_empty());
                         self.path = &self.path[1..];
-                        return Some(Component::RootDir)
+                        return Some(Component::RootDir);
                     } else if let Some(p) = self.prefix {
                         if p.has_implicit_root() && !p.is_verbatim() {
-                            return Some(Component::RootDir)
+                            return Some(Component::RootDir);
                         }
                     } else if self.include_cur_dir() {
                         debug_assert!(!self.path.is_empty());
                         self.path = &self.path[1..];
-                        return Some(Component::CurDir)
+                        return Some(Component::CurDir);
                     }
                 }
                 State::Body if !self.path.is_empty() => {
                     let (size, comp) = self.parse_next_component();
-                    self.path = &self.path[size ..];
-                    if comp.is_some() { return comp }
+                    self.path = &self.path[size..];
+                    if comp.is_some() {
+                        return comp;
+                    }
                 }
                 State::Body => {
                     self.front = State::Done;
                 }
-                State::Done => unreachable!()
+                State::Done => unreachable!(),
             }
         }
         None
@@ -845,8 +894,10 @@ impl<'a> DoubleEndedIterator for Components<'a> {
             match self.back {
                 State::Body if self.path.len() > self.len_before_body() => {
                     let (size, comp) = self.parse_next_component_back();
-                    self.path = &self.path[.. self.path.len() - size];
-                    if comp.is_some() { return comp }
+                    self.path = &self.path[..self.path.len() - size];
+                    if comp.is_some() {
+                        return comp;
+                    }
                 }
                 State::Body => {
                     self.back = State::StartDir;
@@ -854,29 +905,29 @@ impl<'a> DoubleEndedIterator for Components<'a> {
                 State::StartDir => {
                     self.back = State::Prefix;
                     if self.has_physical_root {
-                        self.path = &self.path[.. self.path.len() - 1];
-                        return Some(Component::RootDir)
+                        self.path = &self.path[..self.path.len() - 1];
+                        return Some(Component::RootDir);
                     } else if let Some(p) = self.prefix {
                         if p.has_implicit_root() && !p.is_verbatim() {
-                            return Some(Component::RootDir)
+                            return Some(Component::RootDir);
                         }
                     } else if self.include_cur_dir() {
-                        self.path = &self.path[.. self.path.len() - 1];
-                        return Some(Component::CurDir)
+                        self.path = &self.path[..self.path.len() - 1];
+                        return Some(Component::CurDir);
                     }
                 }
                 State::Prefix if self.prefix_len() > 0 => {
                     self.back = State::Done;
                     return Some(Component::Prefix(PrefixComponent {
                         raw: unsafe { u8_slice_as_os_str(self.path) },
-                        parsed: self.prefix.unwrap()
-                    }))
+                        parsed: self.prefix.unwrap(),
+                    }));
                 }
                 State::Prefix => {
                     self.back = State::Done;
-                    return None
+                    return None;
                 }
-                State::Done => unreachable!()
+                State::Done => unreachable!(),
             }
         }
         None
@@ -886,7 +937,7 @@ impl<'a> DoubleEndedIterator for Components<'a> {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<'a> cmp::PartialEq for Components<'a> {
     fn eq(&self, other: &Components<'a>) -> bool {
-        iter::order::eq(self.clone(), other.clone())
+        Iterator::eq(self.clone(), other.clone())
     }
 }
 
@@ -896,14 +947,14 @@ impl<'a> cmp::Eq for Components<'a> {}
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<'a> cmp::PartialOrd for Components<'a> {
     fn partial_cmp(&self, other: &Components<'a>) -> Option<cmp::Ordering> {
-        iter::order::partial_cmp(self.clone(), other.clone())
+        Iterator::partial_cmp(self.clone(), other.clone())
     }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<'a> cmp::Ord for Components<'a> {
     fn cmp(&self, other: &Components<'a>) -> cmp::Ordering {
-        iter::order::cmp(self.clone(), other.clone())
+        Iterator::cmp(self.clone(), other.clone())
     }
 }
 
@@ -930,15 +981,15 @@ impl<'a> cmp::Ord for Components<'a> {
 /// path.push("system32");
 /// path.set_extension("dll");
 /// ```
-#[derive(Clone, Hash)]
+#[derive(Clone)]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct PathBuf {
-    inner: OsString
+    inner: OsString,
 }
 
 impl PathBuf {
     fn as_mut_vec(&mut self) -> &mut Vec<u8> {
-        unsafe { mem::transmute(self) }
+        unsafe { &mut *(self as *mut PathBuf as *mut Vec<u8>) }
     }
 
     /// Allocates an empty `PathBuf`.
@@ -961,21 +1012,37 @@ impl PathBuf {
     ///
     /// * if `path` has a root but no prefix (e.g. `\windows`), it
     ///   replaces everything except for the prefix (if any) of `self`.
-    /// * if `path` has a prefix but no root, it replaces `self.
+    /// * if `path` has a prefix but no root, it replaces `self`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::path::PathBuf;
+    ///
+    /// let mut path = PathBuf::new();
+    /// path.push("/tmp");
+    /// path.push("file.bk");
+    /// assert_eq!(path, PathBuf::from("/tmp/file.bk"));
+    ///
+    /// // Pushing an absolute path replaces the current path
+    /// path.push("/etc/passwd");
+    /// assert_eq!(path, PathBuf::from("/etc/passwd"));
+    /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn push<P: AsRef<Path>>(&mut self, path: P) {
-        let path = path.as_ref();
+        self._push(path.as_ref())
+    }
 
+    #[allow(deprecated)]
+    fn _push(&mut self, path: &Path) {
         // in general, a separator is needed if the rightmost byte is not a separator
         let mut need_sep = self.as_mut_vec().last().map(|c| !is_sep_byte(*c)).unwrap_or(false);
 
         // in the special case of `C:` on Windows, do *not* add a separator
         {
             let comps = self.components();
-            if comps.prefix_len() > 0 &&
-                comps.prefix_len() == comps.path.len() &&
-                comps.prefix.unwrap().is_drive()
-            {
+            if comps.prefix_len() > 0 && comps.prefix_len() == comps.path.len() &&
+               comps.prefix.unwrap().is_drive() {
                 need_sep = false
             }
         }
@@ -1008,7 +1075,7 @@ impl PathBuf {
                 self.as_mut_vec().truncate(len);
                 true
             }
-            None => false
+            None => false,
         }
     }
 
@@ -1032,11 +1099,15 @@ impl PathBuf {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn set_file_name<S: AsRef<OsStr>>(&mut self, file_name: S) {
+        self._set_file_name(file_name.as_ref())
+    }
+
+    fn _set_file_name(&mut self, file_name: &OsStr) {
         if self.file_name().is_some() {
             let popped = self.pop();
             debug_assert!(popped);
         }
-        self.push(file_name.as_ref());
+        self.push(file_name);
     }
 
     /// Updates `self.extension()` to `extension`.
@@ -1047,14 +1118,19 @@ impl PathBuf {
     /// is added; otherwise it is replaced.
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn set_extension<S: AsRef<OsStr>>(&mut self, extension: S) -> bool {
-        if self.file_name().is_none() { return false; }
+        self._set_extension(extension.as_ref())
+    }
+
+    fn _set_extension(&mut self, extension: &OsStr) -> bool {
+        if self.file_name().is_none() {
+            return false;
+        }
 
         let mut stem = match self.file_stem() {
             Some(stem) => stem.to_os_string(),
             None => OsString::new(),
         };
 
-        let extension = extension.as_ref();
         if !os_str_as_u8_slice(extension).is_empty() {
             stem.push(".");
             stem.push(extension);
@@ -1105,7 +1181,7 @@ impl<P: AsRef<Path>> iter::FromIterator<P> for PathBuf {
 impl<P: AsRef<Path>> iter::Extend<P> for PathBuf {
     fn extend<I: IntoIterator<Item = P>>(&mut self, iter: I) {
         for p in iter {
-            self.push(p)
+            self.push(p.as_ref())
         }
     }
 }
@@ -1122,7 +1198,7 @@ impl ops::Deref for PathBuf {
     type Target = Path;
 
     fn deref(&self) -> &Path {
-        unsafe { mem::transmute(&self.inner[..]) }
+        Path::new(&self.inner)
     }
 }
 
@@ -1133,24 +1209,28 @@ impl Borrow<Path> for PathBuf {
     }
 }
 
-#[stable(feature = "rust1", since = "1.0.0")]
-impl IntoCow<'static, Path> for PathBuf {
-    fn into_cow(self) -> Cow<'static, Path> {
-        Cow::Owned(self)
+#[stable(feature = "cow_from_path", since = "1.6.0")]
+impl<'a> From<&'a Path> for Cow<'a, Path> {
+    #[inline]
+    fn from(s: &'a Path) -> Cow<'a, Path> {
+        Cow::Borrowed(s)
     }
 }
 
-#[stable(feature = "rust1", since = "1.0.0")]
-impl<'a> IntoCow<'a, Path> for &'a Path {
-    fn into_cow(self) -> Cow<'a, Path> {
-        Cow::Borrowed(self)
+#[stable(feature = "cow_from_path", since = "1.6.0")]
+impl<'a> From<PathBuf> for Cow<'a, Path> {
+    #[inline]
+    fn from(s: PathBuf) -> Cow<'a, Path> {
+        Cow::Owned(s)
     }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl ToOwned for Path {
     type Owned = PathBuf;
-    fn to_owned(&self) -> PathBuf { self.to_path_buf() }
+    fn to_owned(&self) -> PathBuf {
+        self.to_path_buf()
+    }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -1161,19 +1241,26 @@ impl cmp::PartialEq for PathBuf {
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
+impl Hash for PathBuf {
+    fn hash<H: Hasher>(&self, h: &mut H) {
+        self.as_path().hash(h)
+    }
+}
+
+#[stable(feature = "rust1", since = "1.0.0")]
 impl cmp::Eq for PathBuf {}
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl cmp::PartialOrd for PathBuf {
     fn partial_cmp(&self, other: &PathBuf) -> Option<cmp::Ordering> {
-        self.components().partial_cmp(&other.components())
+        self.components().partial_cmp(other.components())
     }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl cmp::Ord for PathBuf {
     fn cmp(&self, other: &PathBuf) -> cmp::Ordering {
-        self.components().cmp(&other.components())
+        self.components().cmp(other.components())
     }
 }
 
@@ -1213,21 +1300,26 @@ impl Into<OsString> for PathBuf {
 /// let parent_dir = path.parent();
 /// ```
 ///
-#[derive(Hash)]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Path {
-    inner: OsStr
+    inner: OsStr,
 }
+
+/// An error returned from the `Path::strip_prefix` method indicating that the
+/// prefix was not found in `self`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[stable(since = "1.7.0", feature = "strip_prefix")]
+pub struct StripPrefixError(());
 
 impl Path {
     // The following (private!) function allows construction of a path from a u8
     // slice, which is only safe when it is known to follow the OsStr encoding.
     unsafe fn from_u8_slice(s: &[u8]) -> &Path {
-        mem::transmute(s)
+        Path::new(u8_slice_as_os_str(s))
     }
     // The following (private!) function reveals the byte encoding used for OsStr.
     fn as_u8_slice(&self) -> &[u8] {
-        unsafe { mem::transmute(self) }
+        os_str_as_u8_slice(&self.inner)
     }
 
     /// Directly wrap a string slice as a `Path` slice.
@@ -1282,7 +1374,7 @@ impl Path {
     /// use std::path::Path;
     ///
     /// let path_str = Path::new("foo.txt").to_str();
-    //// assert_eq!(path_str, Some("foo.txt"));
+    /// assert_eq!(path_str, Some("foo.txt"));
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn to_str(&self) -> Option<&str> {
@@ -1338,9 +1430,9 @@ impl Path {
     /// assert!(!Path::new("foo.txt").is_absolute());
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[allow(deprecated)]
     pub fn is_absolute(&self) -> bool {
-        self.has_root() &&
-            (cfg!(unix) || self.prefix().is_some())
+        self.has_root() && (cfg!(unix) || self.prefix().is_some())
     }
 
     /// A path is *relative* if it is not absolute.
@@ -1357,13 +1449,7 @@ impl Path {
         !self.is_absolute()
     }
 
-    /// Returns the *prefix* of a path, if any.
-    ///
-    /// Prefixes are relevant only for Windows paths, and consist of volumes
-    /// like `C:`, UNC prefixes like `\\server`, and others described in more
-    /// detail in `std::os::windows::PathExt`.
-    #[unstable(feature = "path_prefix", reason = "uncertain whether to expose this convenience")]
-    pub fn prefix(&self) -> Option<Prefix> {
+    fn prefix(&self) -> Option<Prefix> {
         self.components().prefix
     }
 
@@ -1385,7 +1471,7 @@ impl Path {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn has_root(&self) -> bool {
-         self.components().has_root()
+        self.components().has_root()
     }
 
     /// The path without its final component, if any.
@@ -1409,11 +1495,13 @@ impl Path {
     pub fn parent(&self) -> Option<&Path> {
         let mut comps = self.components();
         let comp = comps.next_back();
-        comp.and_then(|p| match p {
-            Component::Normal(_) |
-            Component::CurDir |
-            Component::ParentDir => Some(comps.as_path()),
-            _ => None
+        comp.and_then(|p| {
+            match p {
+                Component::Normal(_) |
+                Component::CurDir |
+                Component::ParentDir => Some(comps.as_path()),
+                _ => None,
+            }
         })
     }
 
@@ -1435,20 +1523,33 @@ impl Path {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn file_name(&self) -> Option<&OsStr> {
-        self.components().next_back().and_then(|p| match p {
-            Component::Normal(p) => Some(p.as_ref()),
-            _ => None
+        self.components().next_back().and_then(|p| {
+            match p {
+                Component::Normal(p) => Some(p.as_ref()),
+                _ => None,
+            }
         })
     }
 
     /// Returns a path that, when joined onto `base`, yields `self`.
     ///
+    /// # Errors
+    ///
     /// If `base` is not a prefix of `self` (i.e. `starts_with`
-    /// returns false), then `relative_from` returns `None`.
-    #[unstable(feature = "path_relative_from", reason = "see #23284")]
-    pub fn relative_from<'a, P: ?Sized + AsRef<Path>>(&'a self, base: &'a P) -> Option<&Path>
+    /// returns `false`), returns `Err`.
+    #[stable(since = "1.7.0", feature = "path_strip_prefix")]
+    pub fn strip_prefix<'a, P: ?Sized>(&'a self, base: &'a P)
+                                       -> Result<&'a Path, StripPrefixError>
+        where P: AsRef<Path>
     {
-        iter_after(self.components(), base.as_ref().components()).map(|c| c.as_path())
+        self._strip_prefix(base.as_ref())
+    }
+
+    fn _strip_prefix<'a>(&'a self, base: &'a Path)
+                         -> Result<&'a Path, StripPrefixError> {
+        iter_after(self.components(), base.components())
+            .map(|c| c.as_path())
+            .ok_or(StripPrefixError(()))
     }
 
     /// Determines whether `base` is a prefix of `self`.
@@ -1468,7 +1569,11 @@ impl Path {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn starts_with<P: AsRef<Path>>(&self, base: P) -> bool {
-        iter_after(self.components(), base.as_ref().components()).is_some()
+        self._starts_with(base.as_ref())
+    }
+
+    fn _starts_with(&self, base: &Path) -> bool {
+        iter_after(self.components(), base.components()).is_some()
     }
 
     /// Determines whether `child` is a suffix of `self`.
@@ -1486,7 +1591,11 @@ impl Path {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn ends_with<P: AsRef<Path>>(&self, child: P) -> bool {
-        iter_after(self.components().rev(), child.as_ref().components().rev()).is_some()
+        self._ends_with(child.as_ref())
+    }
+
+    fn _ends_with(&self, child: &Path) -> bool {
+        iter_after(self.components().rev(), child.components().rev()).is_some()
     }
 
     /// Extracts the stem (non-extension) portion of `self.file_name()`.
@@ -1548,6 +1657,10 @@ impl Path {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn join<P: AsRef<Path>>(&self, path: P) -> PathBuf {
+        self._join(path.as_ref())
+    }
+
+    fn _join(&self, path: &Path) -> PathBuf {
         let mut buf = self.to_path_buf();
         buf.push(path);
         buf
@@ -1567,6 +1680,10 @@ impl Path {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn with_file_name<S: AsRef<OsStr>>(&self, file_name: S) -> PathBuf {
+        self._with_file_name(file_name.as_ref())
+    }
+
+    fn _with_file_name(&self, file_name: &OsStr) -> PathBuf {
         let mut buf = self.to_path_buf();
         buf.set_file_name(file_name);
         buf
@@ -1586,6 +1703,10 @@ impl Path {
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn with_extension<S: AsRef<OsStr>>(&self, extension: S) -> PathBuf {
+        self._with_extension(extension.as_ref())
+    }
+
+    fn _with_extension(&self, extension: &OsStr) -> PathBuf {
         let mut buf = self.to_path_buf();
         buf.set_extension(extension);
         buf
@@ -1653,6 +1774,104 @@ impl Path {
     pub fn display(&self) -> Display {
         Display { path: self }
     }
+
+
+    /// Query the file system to get information about a file, directory, etc.
+    ///
+    /// This function will traverse symbolic links to query information about the
+    /// destination file.
+    ///
+    /// This is an alias to `fs::metadata`.
+    #[stable(feature = "path_ext", since = "1.5.0")]
+    pub fn metadata(&self) -> io::Result<fs::Metadata> {
+        fs::metadata(self)
+    }
+
+    /// Query the metadata about a file without following symlinks.
+    ///
+    /// This is an alias to `fs::symlink_metadata`.
+    #[stable(feature = "path_ext", since = "1.5.0")]
+    pub fn symlink_metadata(&self) -> io::Result<fs::Metadata> {
+        fs::symlink_metadata(self)
+    }
+
+    /// Returns the canonical form of the path with all intermediate components
+    /// normalized and symbolic links resolved.
+    ///
+    /// This is an alias to `fs::canonicalize`.
+    #[stable(feature = "path_ext", since = "1.5.0")]
+    pub fn canonicalize(&self) -> io::Result<PathBuf> {
+        fs::canonicalize(self)
+    }
+
+    /// Reads a symbolic link, returning the file that the link points to.
+    ///
+    /// This is an alias to `fs::read_link`.
+    #[stable(feature = "path_ext", since = "1.5.0")]
+    pub fn read_link(&self) -> io::Result<PathBuf> {
+        fs::read_link(self)
+    }
+
+    /// Returns an iterator over the entries within a directory.
+    ///
+    /// The iterator will yield instances of `io::Result<DirEntry>`. New errors may
+    /// be encountered after an iterator is initially constructed.
+    ///
+    /// This is an alias to `fs::read_dir`.
+    #[stable(feature = "path_ext", since = "1.5.0")]
+    pub fn read_dir(&self) -> io::Result<fs::ReadDir> {
+        fs::read_dir(self)
+    }
+
+    /// Returns whether the path points at an existing entity.
+    ///
+    /// This function will traverse symbolic links to query information about the
+    /// destination file. In case of broken symbolic links this will return `false`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::path::Path;
+    /// assert_eq!(Path::new("does_not_exist.txt").exists(), false);
+    /// ```
+    #[stable(feature = "path_ext", since = "1.5.0")]
+    pub fn exists(&self) -> bool {
+        fs::metadata(self).is_ok()
+    }
+
+    /// Returns whether the path is pointing at a regular file.
+    ///
+    /// This function will traverse symbolic links to query information about the
+    /// destination file. In case of broken symbolic links this will return `false`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::path::Path;
+    /// assert_eq!(Path::new("./is_a_directory/").is_file(), false);
+    /// assert_eq!(Path::new("a_file.txt").is_file(), true);
+    /// ```
+    #[stable(feature = "path_ext", since = "1.5.0")]
+    pub fn is_file(&self) -> bool {
+        fs::metadata(self).map(|m| m.is_file()).unwrap_or(false)
+    }
+
+    /// Returns whether the path is pointing at a directory.
+    ///
+    /// This function will traverse symbolic links to query information about the
+    /// destination file. In case of broken symbolic links this will return `false`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::path::Path;
+    /// assert_eq!(Path::new("./is_a_directory/").is_dir(), true);
+    /// assert_eq!(Path::new("a_file.txt").is_dir(), false);
+    /// ```
+    #[stable(feature = "path_ext", since = "1.5.0")]
+    pub fn is_dir(&self) -> bool {
+        fs::metadata(self).map(|m| m.is_dir()).unwrap_or(false)
+    }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -1672,7 +1891,7 @@ impl fmt::Debug for Path {
 /// Helper struct for safely printing paths with `format!()` and `{}`
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Display<'a> {
-    path: &'a Path
+    path: &'a Path,
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -1692,7 +1911,16 @@ impl<'a> fmt::Display for Display<'a> {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl cmp::PartialEq for Path {
     fn eq(&self, other: &Path) -> bool {
-        iter::order::eq(self.components(), other.components())
+        self.components().eq(other.components())
+    }
+}
+
+#[stable(feature = "rust1", since = "1.0.0")]
+impl Hash for Path {
+    fn hash<H: Hasher>(&self, h: &mut H) {
+        for component in self.components() {
+            component.hash(h);
+        }
     }
 }
 
@@ -1702,51 +1930,180 @@ impl cmp::Eq for Path {}
 #[stable(feature = "rust1", since = "1.0.0")]
 impl cmp::PartialOrd for Path {
     fn partial_cmp(&self, other: &Path) -> Option<cmp::Ordering> {
-        self.components().partial_cmp(&other.components())
+        self.components().partial_cmp(other.components())
     }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl cmp::Ord for Path {
     fn cmp(&self, other: &Path) -> cmp::Ordering {
-        self.components().cmp(&other.components())
+        self.components().cmp(other.components())
     }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl AsRef<Path> for Path {
-    fn as_ref(&self) -> &Path { self }
+    fn as_ref(&self) -> &Path {
+        self
+    }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl AsRef<Path> for OsStr {
-    fn as_ref(&self) -> &Path { Path::new(self) }
+    fn as_ref(&self) -> &Path {
+        Path::new(self)
+    }
+}
+
+#[stable(feature = "cow_os_str_as_ref_path", since = "1.8.0")]
+impl<'a> AsRef<Path> for Cow<'a, OsStr> {
+    fn as_ref(&self) -> &Path {
+        Path::new(self)
+    }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl AsRef<Path> for OsString {
-    fn as_ref(&self) -> &Path { Path::new(self) }
+    fn as_ref(&self) -> &Path {
+        Path::new(self)
+    }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl AsRef<Path> for str {
-    fn as_ref(&self) -> &Path { Path::new(self) }
+    fn as_ref(&self) -> &Path {
+        Path::new(self)
+    }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl AsRef<Path> for String {
-    fn as_ref(&self) -> &Path { Path::new(self) }
+    fn as_ref(&self) -> &Path {
+        Path::new(self)
+    }
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl AsRef<Path> for PathBuf {
-    fn as_ref(&self) -> &Path { self }
+    fn as_ref(&self) -> &Path {
+        self
+    }
+}
+
+#[stable(feature = "path_into_iter", since = "1.6.0")]
+impl<'a> IntoIterator for &'a PathBuf {
+    type Item = &'a OsStr;
+    type IntoIter = Iter<'a>;
+    fn into_iter(self) -> Iter<'a> { self.iter() }
+}
+
+#[stable(feature = "path_into_iter", since = "1.6.0")]
+impl<'a> IntoIterator for &'a Path {
+    type Item = &'a OsStr;
+    type IntoIter = Iter<'a>;
+    fn into_iter(self) -> Iter<'a> { self.iter() }
+}
+
+macro_rules! impl_cmp {
+    ($lhs:ty, $rhs: ty) => {
+        #[stable(feature = "partialeq_path", since = "1.6.0")]
+        impl<'a, 'b> PartialEq<$rhs> for $lhs {
+            #[inline]
+            fn eq(&self, other: &$rhs) -> bool { <Path as PartialEq>::eq(self, other) }
+        }
+
+        #[stable(feature = "partialeq_path", since = "1.6.0")]
+        impl<'a, 'b> PartialEq<$lhs> for $rhs {
+            #[inline]
+            fn eq(&self, other: &$lhs) -> bool { <Path as PartialEq>::eq(self, other) }
+        }
+
+        #[stable(feature = "cmp_path", since = "1.8.0")]
+        impl<'a, 'b> PartialOrd<$rhs> for $lhs {
+            #[inline]
+            fn partial_cmp(&self, other: &$rhs) -> Option<cmp::Ordering> {
+                <Path as PartialOrd>::partial_cmp(self, other)
+            }
+        }
+
+        #[stable(feature = "cmp_path", since = "1.8.0")]
+        impl<'a, 'b> PartialOrd<$lhs> for $rhs {
+            #[inline]
+            fn partial_cmp(&self, other: &$lhs) -> Option<cmp::Ordering> {
+                <Path as PartialOrd>::partial_cmp(self, other)
+            }
+        }
+    }
+}
+
+impl_cmp!(PathBuf, Path);
+impl_cmp!(PathBuf, &'a Path);
+impl_cmp!(Cow<'a, Path>, Path);
+impl_cmp!(Cow<'a, Path>, &'b Path);
+impl_cmp!(Cow<'a, Path>, PathBuf);
+
+macro_rules! impl_cmp_os_str {
+    ($lhs:ty, $rhs: ty) => {
+        #[stable(feature = "cmp_path", since = "1.8.0")]
+        impl<'a, 'b> PartialEq<$rhs> for $lhs {
+            #[inline]
+            fn eq(&self, other: &$rhs) -> bool { <Path as PartialEq>::eq(self, other.as_ref()) }
+        }
+
+        #[stable(feature = "cmp_path", since = "1.8.0")]
+        impl<'a, 'b> PartialEq<$lhs> for $rhs {
+            #[inline]
+            fn eq(&self, other: &$lhs) -> bool { <Path as PartialEq>::eq(self.as_ref(), other) }
+        }
+
+        #[stable(feature = "cmp_path", since = "1.8.0")]
+        impl<'a, 'b> PartialOrd<$rhs> for $lhs {
+            #[inline]
+            fn partial_cmp(&self, other: &$rhs) -> Option<cmp::Ordering> {
+                <Path as PartialOrd>::partial_cmp(self, other.as_ref())
+            }
+        }
+
+        #[stable(feature = "cmp_path", since = "1.8.0")]
+        impl<'a, 'b> PartialOrd<$lhs> for $rhs {
+            #[inline]
+            fn partial_cmp(&self, other: &$lhs) -> Option<cmp::Ordering> {
+                <Path as PartialOrd>::partial_cmp(self.as_ref(), other)
+            }
+        }
+    }
+}
+
+impl_cmp_os_str!(PathBuf, OsStr);
+impl_cmp_os_str!(PathBuf, &'a OsStr);
+impl_cmp_os_str!(PathBuf, Cow<'a, OsStr>);
+impl_cmp_os_str!(PathBuf, OsString);
+impl_cmp_os_str!(Path, OsStr);
+impl_cmp_os_str!(Path, &'a OsStr);
+impl_cmp_os_str!(Path, Cow<'a, OsStr>);
+impl_cmp_os_str!(Path, OsString);
+impl_cmp_os_str!(&'a Path, OsStr);
+impl_cmp_os_str!(&'a Path, Cow<'b, OsStr>);
+impl_cmp_os_str!(&'a Path, OsString);
+impl_cmp_os_str!(Cow<'a, Path>, OsStr);
+impl_cmp_os_str!(Cow<'a, Path>, &'b OsStr);
+impl_cmp_os_str!(Cow<'a, Path>, OsString);
+
+#[stable(since = "1.7.0", feature = "strip_prefix")]
+impl fmt::Display for StripPrefixError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.description().fmt(f)
+    }
+}
+
+#[stable(since = "1.7.0", feature = "strip_prefix")]
+impl Error for StripPrefixError {
+    fn description(&self) -> &str { "prefix not found" }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::prelude::*;
     use string::{ToString, String};
     use vec::Vec;
 
@@ -1834,21 +2191,21 @@ mod tests {
     );
 
     #[test]
-    fn into_cow() {
-        use borrow::{Cow, IntoCow};
+    fn into() {
+        use borrow::Cow;
 
         let static_path = Path::new("/home/foo");
-        let static_cow_path: Cow<'static, Path> = static_path.into_cow();
+        let static_cow_path: Cow<'static, Path> = static_path.into();
         let pathbuf = PathBuf::from("/home/foo");
 
         {
             let path: &Path = &pathbuf;
-            let borrowed_cow_path: Cow<Path> = path.into_cow();
+            let borrowed_cow_path: Cow<Path> = path.into();
 
             assert_eq!(static_cow_path, borrowed_cow_path);
         }
 
-        let owned_cow_path: Cow<'static, Path> = pathbuf.into_cow();
+        let owned_cow_path: Cow<'static, Path> = pathbuf.into();
 
         assert_eq!(static_cow_path, owned_cow_path);
     }
@@ -2782,20 +3139,26 @@ mod tests {
             tp!("C:a\\b\\c", "C:d", "C:d");
             tp!("C:", r"a\b\c", r"C:a\b\c");
             tp!("C:", r"..\a", r"C:..\a");
-            tp!("\\\\server\\share\\foo", "bar", "\\\\server\\share\\foo\\bar");
+            tp!("\\\\server\\share\\foo",
+                "bar",
+                "\\\\server\\share\\foo\\bar");
             tp!("\\\\server\\share\\foo", "C:baz", "C:baz");
             tp!("\\\\?\\C:\\a\\b", "C:c\\d", "C:c\\d");
             tp!("\\\\?\\C:a\\b", "C:c\\d", "C:c\\d");
             tp!("\\\\?\\C:\\a\\b", "C:\\c\\d", "C:\\c\\d");
             tp!("\\\\?\\foo\\bar", "baz", "\\\\?\\foo\\bar\\baz");
-            tp!("\\\\?\\UNC\\server\\share\\foo", "bar", "\\\\?\\UNC\\server\\share\\foo\\bar");
+            tp!("\\\\?\\UNC\\server\\share\\foo",
+                "bar",
+                "\\\\?\\UNC\\server\\share\\foo\\bar");
             tp!("\\\\?\\UNC\\server\\share", "C:\\a", "C:\\a");
             tp!("\\\\?\\UNC\\server\\share", "C:a", "C:a");
 
             // Note: modified from old path API
             tp!("\\\\?\\UNC\\server", "foo", "\\\\?\\UNC\\server\\foo");
 
-            tp!("C:\\a", "\\\\?\\UNC\\server\\share", "\\\\?\\UNC\\server\\share");
+            tp!("C:\\a",
+                "\\\\?\\UNC\\server\\share",
+                "\\\\?\\UNC\\server\\share");
             tp!("\\\\.\\foo\\bar", "baz", "\\\\.\\foo\\bar\\baz");
             tp!("\\\\.\\foo\\bar", "C:a", "C:a");
             // again, not sure about the following, but I'm assuming \\.\ should be verbatim
@@ -2848,9 +3211,15 @@ mod tests {
             tp!("\\\\?\\C:\\a\\b", "\\\\?\\C:\\a", true);
             tp!("\\\\?\\C:\\a", "\\\\?\\C:\\", true);
             tp!("\\\\?\\C:\\", "\\\\?\\C:\\", false);
-            tp!("\\\\?\\UNC\\server\\share\\a\\b", "\\\\?\\UNC\\server\\share\\a", true);
-            tp!("\\\\?\\UNC\\server\\share\\a", "\\\\?\\UNC\\server\\share\\", true);
-            tp!("\\\\?\\UNC\\server\\share", "\\\\?\\UNC\\server\\share", false);
+            tp!("\\\\?\\UNC\\server\\share\\a\\b",
+                "\\\\?\\UNC\\server\\share\\a",
+                true);
+            tp!("\\\\?\\UNC\\server\\share\\a",
+                "\\\\?\\UNC\\server\\share\\",
+                true);
+            tp!("\\\\?\\UNC\\server\\share",
+                "\\\\?\\UNC\\server\\share",
+                false);
             tp!("\\\\.\\a\\b\\c", "\\\\.\\a\\b", true);
             tp!("\\\\.\\a\\b", "\\\\.\\a\\", true);
             tp!("\\\\.\\a", "\\\\.\\a", false);
@@ -2916,13 +3285,46 @@ mod tests {
         tfe!(".", "foo", ".", false);
         tfe!("foo/", "bar", "foo.bar", true);
         tfe!("foo/.", "bar", "foo.bar", true);
-        tfe!("..", "foo", "..",  false);
+        tfe!("..", "foo", "..", false);
         tfe!("foo/..", "bar", "foo/..", false);
         tfe!("/", "foo", "/", false);
     }
 
     #[test]
+    fn test_eq_recievers() {
+        use borrow::Cow;
+
+        let borrowed: &Path = Path::new("foo/bar");
+        let mut owned: PathBuf = PathBuf::new();
+        owned.push("foo");
+        owned.push("bar");
+        let borrowed_cow: Cow<Path> = borrowed.into();
+        let owned_cow: Cow<Path> = owned.clone().into();
+
+        macro_rules! t {
+            ($($current:expr),+) => {
+                $(
+                    assert_eq!($current, borrowed);
+                    assert_eq!($current, owned);
+                    assert_eq!($current, borrowed_cow);
+                    assert_eq!($current, owned_cow);
+                )+
+            }
+        }
+
+        t!(borrowed, owned, borrowed_cow, owned_cow);
+    }
+
+    #[test]
     pub fn test_compare() {
+        use hash::{Hash, Hasher, SipHasher};
+
+        fn hash<T: Hash>(t: T) -> u64 {
+            let mut s = SipHasher::new_with_keys(0, 0);
+            t.hash(&mut s);
+            s.finish()
+        }
+
         macro_rules! tc(
             ($path1:expr, $path2:expr, eq: $eq:expr,
              starts_with: $starts_with:expr, ends_with: $ends_with:expr,
@@ -2933,6 +3335,9 @@ mod tests {
                  let eq = path1 == path2;
                  assert!(eq == $eq, "{:?} == {:?}, expected {:?}, got {:?}",
                          $path1, $path2, $eq, eq);
+                 assert!($eq == (hash(path1) == hash(path2)),
+                         "{:?} == {:?}, expected {:?}, got {} and {}",
+                         $path1, $path2, $eq, hash(path1), hash(path2));
 
                  let starts_with = path1.starts_with(path2);
                  assert!(starts_with == $starts_with,
@@ -2944,11 +3349,13 @@ mod tests {
                          "{:?}.ends_with({:?}), expected {:?}, got {:?}", $path1, $path2,
                          $ends_with, ends_with);
 
-                 let relative_from = path1.relative_from(path2).map(|p| p.to_str().unwrap());
+                 let relative_from = path1.strip_prefix(path2)
+                                          .map(|p| p.to_str().unwrap())
+                                          .ok();
                  let exp: Option<&str> = $relative_from;
                  assert!(relative_from == exp,
-                         "{:?}.relative_from({:?}), expected {:?}, got {:?}", $path1, $path2,
-                         exp, relative_from);
+                         "{:?}.strip_prefix({:?}), expected {:?}, got {:?}",
+                         $path1, $path2, exp, relative_from);
             });
         );
 

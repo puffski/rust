@@ -14,13 +14,28 @@
 //! by the compiler to implement comparison operators. Rust programs may
 //! implement `PartialOrd` to overload the `<`, `<=`, `>`, and `>=` operators,
 //! and may implement `PartialEq` to overload the `==` and `!=` operators.
+//!
+//! # Examples
+//!
+//! ```
+//! let x: u32 = 0;
+//! let y: u32 = 1;
+//!
+//! // these two lines are equivalent
+//! assert_eq!(x < y, true);
+//! assert_eq!(x.lt(&y), true);
+//!
+//! // these two lines are also equivalent
+//! assert_eq!(x == y, false);
+//! assert_eq!(x.eq(&y), false);
+//! ```
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
 use self::Ordering::*;
 
 use marker::Sized;
-use option::Option::{self, Some, None};
+use option::Option::{self, Some};
 
 /// Trait for equality comparisons which are [partial equivalence
 /// relations](http://en.wikipedia.org/wiki/Partial_equivalence_relation).
@@ -42,6 +57,18 @@ use option::Option::{self, Some, None};
 /// in terms of it by default. Any manual implementation of `ne` *must* respect
 /// the rule that `eq` is a strict inverse of `ne`; that is, `!(a == b)` if and
 /// only if `a != b`.
+///
+/// This trait can be used with `#[derive]`.
+///
+/// # Examples
+///
+/// ```
+/// let x: u32 = 0;
+/// let y: u32 = 1;
+///
+/// assert_eq!(x == y, false);
+/// assert_eq!(x.eq(&y), false);
+/// ```
 #[lang = "eq"]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait PartialEq<Rhs: ?Sized = Self> {
@@ -68,6 +95,8 @@ pub trait PartialEq<Rhs: ?Sized = Self> {
 ///
 /// This property cannot be checked by the compiler, and therefore `Eq` implies
 /// `PartialEq`, and has no extra methods.
+///
+/// This trait can be used with `#[derive]`.
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait Eq: PartialEq<Self> {
     // FIXME #13101: this method is used solely by #[deriving] to
@@ -135,8 +164,6 @@ impl Ordering {
     /// This method can be used to reverse a comparison:
     ///
     /// ```
-    /// use std::cmp::Ordering;
-    ///
     /// let mut data: &mut [_] = &mut [2, 10, 5, 8];
     ///
     /// // sort the array from largest to smallest.
@@ -148,14 +175,10 @@ impl Ordering {
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn reverse(self) -> Ordering {
-        unsafe {
-            // this compiles really nicely (to a single instruction);
-            // an explicit match has a pile of branches and
-            // comparisons.
-            //
-            // NB. it is safe because of the explicit discriminants
-            // given above.
-            ::mem::transmute::<_, Ordering>(-(self as i8))
+        match self {
+            Less => Greater,
+            Equal => Equal,
+            Greater => Less,
         }
     }
 }
@@ -167,7 +190,8 @@ impl Ordering {
 /// - total and antisymmetric: exactly one of `a < b`, `a == b` or `a > b` is true; and
 /// - transitive, `a < b` and `b < c` implies `a < c`. The same must hold for both `==` and `>`.
 ///
-/// When this trait is `derive`d, it produces a lexicographic ordering.
+/// This trait can be used with `#[derive]`. When `derive`d, it will produce a lexicographic
+/// ordering based on the top-to-bottom declaration order of the struct's members.
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait Ord: Eq + PartialOrd<Self> {
     /// This method returns an `Ordering` between `self` and `other`.
@@ -194,7 +218,6 @@ impl Eq for Ordering {}
 #[stable(feature = "rust1", since = "1.0.0")]
 impl Ord for Ordering {
     #[inline]
-    #[stable(feature = "rust1", since = "1.0.0")]
     fn cmp(&self, other: &Ordering) -> Ordering {
         (*self as i32).cmp(&(*other as i32))
     }
@@ -203,7 +226,6 @@ impl Ord for Ordering {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl PartialOrd for Ordering {
     #[inline]
-    #[stable(feature = "rust1", since = "1.0.0")]
     fn partial_cmp(&self, other: &Ordering) -> Option<Ordering> {
         (*self as i32).partial_cmp(&(*other as i32))
     }
@@ -213,7 +235,7 @@ impl PartialOrd for Ordering {
 ///
 /// The comparison must satisfy, for all `a`, `b` and `c`:
 ///
-/// - antisymmetry: if `a < b` then `!(a > b)` and vice versa; and
+/// - antisymmetry: if `a < b` then `!(a > b)`, as well as `a > b` implying `!(a < b)`; and
 /// - transitivity: `a < b` and `b < c` implies `a < c`. The same must hold for both `==` and `>`.
 ///
 /// Note that these requirements mean that the trait itself must be implemented symmetrically and
@@ -226,6 +248,19 @@ impl PartialOrd for Ordering {
 /// However it remains possible to implement the others separately for types which do not have a
 /// total order. For example, for floating point numbers, `NaN < 0 == false` and `NaN >= 0 ==
 /// false` (cf. IEEE 754-2008 section 5.11).
+///
+/// This trait can be used with `#[derive]`. When `derive`d, it will produce an ordering
+/// based on the top-to-bottom declaration order of the struct's members.
+///
+/// # Examples
+///
+/// ```
+/// let x : u32 = 0;
+/// let y : u32 = 1;
+///
+/// assert_eq!(x < y, true);
+/// assert_eq!(x.lt(&y), true);
+/// ```
 #[lang = "ord"]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait PartialOrd<Rhs: ?Sized = Self>: PartialEq<Rhs> {
@@ -260,8 +295,6 @@ pub trait PartialOrd<Rhs: ?Sized = Self>: PartialEq<Rhs> {
     /// # Examples
     ///
     /// ```
-    /// use std::cmp::Ordering;
-    ///
     /// let result = 1.0 < 2.0;
     /// assert_eq!(result, true);
     ///
@@ -376,72 +409,6 @@ pub fn max<T: Ord>(v1: T, v2: T) -> T {
     if v2 >= v1 { v2 } else { v1 }
 }
 
-/// Compare and return the minimum of two values if there is one.
-///
-/// Returns the first argument if the comparison determines them to be equal.
-///
-/// # Examples
-///
-/// ```
-/// # #![feature(cmp_partial)]
-/// use std::cmp;
-///
-/// assert_eq!(Some(1), cmp::partial_min(1, 2));
-/// assert_eq!(Some(2), cmp::partial_min(2, 2));
-/// ```
-///
-/// When comparison is impossible:
-///
-/// ```
-/// # #![feature(cmp_partial)]
-/// use std::cmp;
-///
-/// let result = cmp::partial_min(std::f64::NAN, 1.0);
-/// assert_eq!(result, None);
-/// ```
-#[inline]
-#[unstable(feature = "cmp_partial")]
-pub fn partial_min<T: PartialOrd>(v1: T, v2: T) -> Option<T> {
-    match v1.partial_cmp(&v2) {
-        Some(Less) | Some(Equal) => Some(v1),
-        Some(Greater) => Some(v2),
-        None => None
-    }
-}
-
-/// Compare and return the maximum of two values if there is one.
-///
-/// Returns the second argument if the comparison determines them to be equal.
-///
-/// # Examples
-///
-/// ```
-/// # #![feature(cmp_partial)]
-/// use std::cmp;
-///
-/// assert_eq!(Some(2), cmp::partial_max(1, 2));
-/// assert_eq!(Some(2), cmp::partial_max(2, 2));
-/// ```
-///
-/// When comparison is impossible:
-///
-/// ```
-/// # #![feature(cmp_partial)]
-/// use std::cmp;
-///
-/// let result = cmp::partial_max(std::f64::NAN, 1.0);
-/// assert_eq!(result, None);
-/// ```
-#[inline]
-#[unstable(feature = "cmp_partial")]
-pub fn partial_max<T: PartialOrd>(v1: T, v2: T) -> Option<T> {
-    match v1.partial_cmp(&v2) {
-        Some(Equal) | Some(Less) => Some(v2),
-        Some(Greater) => Some(v1),
-        None => None
-    }
-}
-
 // Implementation of PartialEq, Eq, PartialOrd and Ord for primitive types
 mod impls {
     use cmp::{PartialOrd, Ord, PartialEq, Eq, Ordering};
@@ -524,17 +491,33 @@ mod impls {
         }
     }
 
-    partial_ord_impl! { char usize u8 u16 u32 u64 isize i8 i16 i32 i64 f32 f64 }
+    partial_ord_impl! { f32 f64 }
 
     macro_rules! ord_impl {
         ($($t:ty)*) => ($(
             #[stable(feature = "rust1", since = "1.0.0")]
+            impl PartialOrd for $t {
+                #[inline]
+                fn partial_cmp(&self, other: &$t) -> Option<Ordering> {
+                    Some(self.cmp(other))
+                }
+                #[inline]
+                fn lt(&self, other: &$t) -> bool { (*self) < (*other) }
+                #[inline]
+                fn le(&self, other: &$t) -> bool { (*self) <= (*other) }
+                #[inline]
+                fn ge(&self, other: &$t) -> bool { (*self) >= (*other) }
+                #[inline]
+                fn gt(&self, other: &$t) -> bool { (*self) > (*other) }
+            }
+
+            #[stable(feature = "rust1", since = "1.0.0")]
             impl Ord for $t {
                 #[inline]
                 fn cmp(&self, other: &$t) -> Ordering {
-                    if *self < *other { Less }
-                    else if *self > *other { Greater }
-                    else { Equal }
+                    if *self == *other { Equal }
+                    else if *self < *other { Less }
+                    else { Greater }
                 }
             }
         )*)
